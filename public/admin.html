@@ -1,0 +1,721 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>LPOS Chat Admin</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    font-size: 14px;
+    background: #f5f6f8;
+    color: #1a1a2e;
+  }
+
+  /* ── Login ── */
+  #view-login {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+  }
+  .login-card {
+    background: #fff;
+    border-radius: 10px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.10);
+    padding: 40px 36px;
+    width: 340px;
+    text-align: center;
+  }
+  .login-card h1 {
+    font-size: 20px;
+    font-weight: 700;
+    margin-bottom: 6px;
+    color: #1a1a2e;
+  }
+  .login-card .subtitle {
+    font-size: 13px;
+    color: #888;
+    margin-bottom: 24px;
+  }
+  .login-card input {
+    width: 100%;
+    padding: 10px 13px;
+    border: 1px solid #ddd;
+    border-radius: 7px;
+    font-size: 14px;
+    outline: none;
+    margin-bottom: 14px;
+    color: #1a1a2e;
+  }
+  .login-card input:focus { border-color: #f0a500; }
+  .login-card button {
+    width: 100%;
+    padding: 10px;
+    background: #f0a500;
+    color: #fff;
+    border: none;
+    border-radius: 7px;
+    font-size: 14px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  .login-card button:hover { background: #d99200; }
+  #login-error { color: #d44; font-size: 12px; margin-top: 10px; min-height: 18px; }
+
+  /* ── App shell ── */
+  #app { display: none; flex-direction: column; height: 100%; }
+
+  .top-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    height: 52px;
+    background: #fff;
+    border-bottom: 1px solid #e8e8e8;
+    flex-shrink: 0;
+  }
+  .top-bar .brand {
+    font-weight: 700;
+    font-size: 16px;
+    color: #1a1a2e;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .top-bar .brand span { color: #f0a500; }
+  .top-bar button.logout {
+    background: none;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 5px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    color: #555;
+  }
+  .top-bar button.logout:hover { background: #f5f5f5; }
+
+  .content { flex: 1; overflow: hidden; display: flex; }
+
+  /* ── Rooms view ── */
+  #view-rooms { flex: 1; overflow-y: auto; padding: 28px 28px; }
+  #view-rooms h2 { font-size: 18px; margin-bottom: 20px; }
+
+  .create-form {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 28px;
+  }
+  .create-form input {
+    flex: 1;
+    padding: 9px 13px;
+    border: 1px solid #ddd;
+    border-radius: 7px;
+    font-size: 14px;
+    outline: none;
+  }
+  .create-form input:focus { border-color: #f0a500; }
+  .create-form button {
+    padding: 9px 20px;
+    background: #f0a500;
+    color: #fff;
+    border: none;
+    border-radius: 7px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .create-form button:hover { background: #d99200; }
+
+  .rooms-table-wrap { overflow-x: auto; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: #fff;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 1px 6px rgba(0,0,0,0.06);
+  }
+  th {
+    text-align: left;
+    padding: 11px 14px;
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #888;
+    background: #fafafa;
+    border-bottom: 1px solid #eee;
+  }
+  td {
+    padding: 11px 14px;
+    border-bottom: 1px solid #f0f0f0;
+    vertical-align: middle;
+  }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: #fafbff; }
+
+  .room-link-btn {
+    background: none;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    color: #555;
+  }
+  .room-link-btn:hover { background: #f0f0f0; }
+  .room-name-btn {
+    background: none;
+    border: none;
+    color: #1a6eff;
+    font-size: 14px;
+    cursor: pointer;
+    padding: 0;
+    text-align: left;
+    font-weight: 500;
+  }
+  .room-name-btn:hover { text-decoration: underline; }
+  .btn-danger {
+    background: none;
+    border: 1px solid #e8aaaa;
+    border-radius: 5px;
+    padding: 4px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    color: #c44;
+  }
+  .btn-danger:hover { background: #fff0f0; }
+
+  /* ── Room detail ── */
+  #view-room { flex: 1; display: none; flex-direction: column; overflow: hidden; }
+  .room-detail-header {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 16px 24px;
+    background: #fff;
+    border-bottom: 1px solid #e8e8e8;
+    flex-shrink: 0;
+  }
+  .room-detail-header button.back {
+    background: none;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 5px 12px;
+    font-size: 13px;
+    cursor: pointer;
+    color: #555;
+  }
+  .room-detail-header button.back:hover { background: #f5f5f5; }
+  .room-detail-header h2 { font-size: 17px; font-weight: 700; }
+  .presence-badge {
+    margin-left: auto;
+    background: #eef6ee;
+    color: #3a9a3a;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 12px;
+  }
+
+  .room-detail-body {
+    flex: 1;
+    display: flex;
+    overflow: hidden;
+    gap: 0;
+  }
+
+  /* left: chat feed */
+  .chat-feed-col {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    border-right: 1px solid #e8e8e8;
+    overflow: hidden;
+  }
+  .col-label {
+    padding: 10px 16px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #aaa;
+    border-bottom: 1px solid #eee;
+    background: #fafafa;
+    flex-shrink: 0;
+  }
+  #admin-message-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: #fff;
+  }
+  #admin-message-list::-webkit-scrollbar { width: 5px; }
+  #admin-message-list::-webkit-scrollbar-thumb { background: #ddd; border-radius: 3px; }
+
+  .admin-msg-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 8px;
+    border-radius: 6px;
+  }
+  .admin-msg-row:hover { background: #f8f8f8; }
+  .admin-msg-body { flex: 1; min-width: 0; }
+  .admin-msg-meta {
+    font-size: 11px;
+    color: #999;
+    margin-bottom: 3px;
+  }
+  .admin-msg-meta .uname { font-weight: 600; color: #444; margin-right: 6px; }
+  .admin-msg-content { font-size: 14px; color: #222; word-break: break-word; white-space: pre-wrap; line-height: 1.4; }
+  .admin-msg-del {
+    background: none;
+    border: none;
+    color: #ccc;
+    cursor: pointer;
+    font-size: 16px;
+    line-height: 1;
+    flex-shrink: 0;
+    padding: 2px 4px;
+    border-radius: 4px;
+  }
+  .admin-msg-del:hover { color: #c44; background: #fff0f0; }
+
+  /* right: users panel */
+  .users-col {
+    width: 220px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: #fff;
+  }
+  #users-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .user-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 7px 0;
+    border-bottom: 1px solid #f0f0f0;
+  }
+  .user-row:last-child { border-bottom: none; }
+  .user-name { font-size: 13px; font-weight: 500; color: #333; }
+  .mute-btn {
+    background: none;
+    border: 1px solid #e8d0a0;
+    border-radius: 5px;
+    padding: 3px 10px;
+    font-size: 11px;
+    cursor: pointer;
+    color: #996600;
+  }
+  .mute-btn:hover { background: #fff8e8; }
+  .no-users { font-size: 13px; color: #bbb; padding: 8px 0; }
+
+  /* toast */
+  #toast {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: #333;
+    color: #fff;
+    padding: 10px 18px;
+    border-radius: 7px;
+    font-size: 13px;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s;
+    z-index: 999;
+  }
+  #toast.show { opacity: 1; }
+</style>
+</head>
+<body>
+
+<!-- Login -->
+<div id="view-login">
+  <div class="login-card">
+    <h1>LPOS Chat</h1>
+    <p class="subtitle">Admin Panel</p>
+    <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" />
+    <button id="login-btn">Login</button>
+    <div id="login-error"></div>
+  </div>
+</div>
+
+<!-- App shell -->
+<div id="app">
+  <div class="top-bar">
+    <div class="brand">LPOS <span>Chat</span> Admin</div>
+    <button class="logout" id="logout-btn">Logout</button>
+  </div>
+  <div class="content">
+    <!-- Rooms list -->
+    <div id="view-rooms">
+      <h2>Rooms</h2>
+      <div class="create-form">
+        <input id="new-room-name" type="text" placeholder="Room name…" maxlength="80" />
+        <button id="create-room-btn">Create Room</button>
+      </div>
+      <div class="rooms-table-wrap">
+        <table id="rooms-table">
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>ID</th>
+              <th>Widget URL</th>
+              <th>Created</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="rooms-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Room detail -->
+    <div id="view-room">
+      <div class="room-detail-header">
+        <button class="back" id="back-btn">← Back</button>
+        <h2 id="room-detail-name"></h2>
+        <div class="presence-badge" id="detail-presence">0 online</div>
+      </div>
+      <div class="room-detail-body">
+        <div class="chat-feed-col">
+          <div class="col-label">Live Chat</div>
+          <div id="admin-message-list"></div>
+        </div>
+        <div class="users-col">
+          <div class="col-label">Connected Users</div>
+          <div id="users-list"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  let token = localStorage.getItem('lpos_admin_token') || '';
+  let currentRoom = null;
+  let adminWs = null;
+  let usersInterval = null;
+
+  // ── Elements ──
+  const viewLogin = document.getElementById('view-login');
+  const appEl = document.getElementById('app');
+  const viewRooms = document.getElementById('view-rooms');
+  const viewRoom = document.getElementById('view-room');
+  const loginPassword = document.getElementById('login-password');
+  const loginBtn = document.getElementById('login-btn');
+  const loginError = document.getElementById('login-error');
+  const logoutBtn = document.getElementById('logout-btn');
+  const newRoomName = document.getElementById('new-room-name');
+  const createRoomBtn = document.getElementById('create-room-btn');
+  const roomsTbody = document.getElementById('rooms-tbody');
+  const backBtn = document.getElementById('back-btn');
+  const roomDetailName = document.getElementById('room-detail-name');
+  const detailPresence = document.getElementById('detail-presence');
+  const adminMessageList = document.getElementById('admin-message-list');
+  const usersList = document.getElementById('users-list');
+
+  // ── Boot ──
+  if (token) {
+    showApp();
+  }
+
+  // ── Login ──
+  loginBtn.addEventListener('click', doLogin);
+  loginPassword.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+
+  async function doLogin() {
+    loginError.textContent = '';
+    const password = loginPassword.value;
+    const res = await fetch('/api/admin/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password }),
+    });
+    if (!res.ok) {
+      loginError.textContent = 'Invalid password.';
+      return;
+    }
+    const data = await res.json();
+    token = data.token;
+    localStorage.setItem('lpos_admin_token', token);
+    showApp();
+  }
+
+  logoutBtn.addEventListener('click', () => {
+    token = '';
+    localStorage.removeItem('lpos_admin_token');
+    location.reload();
+  });
+
+  function showApp() {
+    viewLogin.style.display = 'none';
+    appEl.style.display = 'flex';
+    showRooms();
+  }
+
+  // ── Rooms view ──
+  function showRooms() {
+    disconnectAdminWs();
+    clearInterval(usersInterval);
+    viewRooms.style.display = 'block';
+    viewRoom.style.display = 'none';
+    loadRooms();
+  }
+
+  async function loadRooms() {
+    const res = await apiFetch('/api/rooms');
+    if (!res) return;
+    const rooms = await res.json();
+    roomsTbody.innerHTML = '';
+    rooms.forEach(renderRoomRow);
+  }
+
+  function renderRoomRow(room) {
+    const tr = document.createElement('tr');
+    const widgetUrl = `${location.origin}/room/${room.id}`;
+    const created = new Date(room.created_at).toLocaleDateString('en-US', {
+      year: 'numeric', month: 'short', day: 'numeric',
+    });
+    tr.innerHTML = `
+      <td><button class="room-name-btn" data-id="${room.id}">${esc(room.name)}</button></td>
+      <td><code style="font-size:12px;color:#666">${room.id}</code></td>
+      <td>
+        <button class="room-link-btn" data-url="${esc(widgetUrl)}">Copy Link</button>
+      </td>
+      <td style="color:#888;font-size:13px">${created}</td>
+      <td><button class="btn-danger" data-delete-id="${room.id}">Delete</button></td>
+    `;
+    tr.querySelector('.room-name-btn').addEventListener('click', () => openRoom(room));
+    tr.querySelector('.room-link-btn').addEventListener('click', (e) => {
+      navigator.clipboard.writeText(e.currentTarget.dataset.url);
+      showToast('Link copied!');
+    });
+    tr.querySelector('[data-delete-id]').addEventListener('click', () => deleteRoom(room.id, room.name));
+    roomsTbody.appendChild(tr);
+  }
+
+  createRoomBtn.addEventListener('click', async () => {
+    const name = newRoomName.value.trim();
+    if (!name) return;
+    const res = await apiFetch('/api/rooms', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+    if (!res) return;
+    newRoomName.value = '';
+    loadRooms();
+  });
+
+  async function deleteRoom(id, name) {
+    if (!confirm(`Delete room "${name}"? This cannot be undone.`)) return;
+    await apiFetch(`/api/rooms/${id}`, { method: 'DELETE' });
+    loadRooms();
+  }
+
+  // ── Room detail ──
+  function openRoom(room) {
+    currentRoom = room;
+    viewRooms.style.display = 'none';
+    viewRoom.style.display = 'flex';
+    roomDetailName.textContent = room.name;
+    detailPresence.textContent = '0 online';
+    adminMessageList.innerHTML = '';
+    usersList.innerHTML = '';
+
+    loadAdminHistory(room.id);
+    connectAdminWs(room.id);
+    loadUsers(room.id);
+    usersInterval = setInterval(() => loadUsers(room.id), 5000);
+  }
+
+  backBtn.addEventListener('click', showRooms);
+
+  async function loadAdminHistory(roomId) {
+    const res = await apiFetch(`/api/rooms/${roomId}/messages`);
+    if (!res) return;
+    const msgs = await res.json();
+    adminMessageList.innerHTML = '';
+    msgs.forEach(renderAdminMessage);
+    adminMessageList.scrollTop = adminMessageList.scrollHeight;
+  }
+
+  function renderAdminMessage(m) {
+    const msgId = m.id;
+    const uname = m.username;
+    const content = m.content;
+    const ts = m.createdAt || m.created_at;
+    const timeStr = ts ? formatTime(new Date(ts)) : '';
+
+    const row = document.createElement('div');
+    row.className = 'admin-msg-row';
+    if (msgId) row.setAttribute('data-id', msgId);
+
+    const body = document.createElement('div');
+    body.className = 'admin-msg-body';
+    body.innerHTML = `
+      <div class="admin-msg-meta">
+        <span class="uname">${esc(uname)}</span>${esc(timeStr)}
+      </div>
+      <div class="admin-msg-content">${esc(content)}</div>
+    `;
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'admin-msg-del';
+    delBtn.title = 'Delete message';
+    delBtn.textContent = '✕';
+    delBtn.addEventListener('click', () => deleteMessage(msgId, row));
+
+    row.appendChild(body);
+    row.appendChild(delBtn);
+    adminMessageList.appendChild(row);
+  }
+
+  async function deleteMessage(msgId, rowEl) {
+    if (!confirm('Delete this message?')) return;
+    await apiFetch(`/api/messages/${msgId}`, { method: 'DELETE' });
+    // The WS broadcast will also remove it, but remove locally immediately
+    rowEl.remove();
+  }
+
+  // ── Users panel ──
+  async function loadUsers(roomId) {
+    const res = await apiFetch(`/api/rooms/${roomId}/users`);
+    if (!res) return;
+    const users = await res.json();
+    usersList.innerHTML = '';
+    if (users.length === 0) {
+      usersList.innerHTML = '<div class="no-users">No users connected</div>';
+      return;
+    }
+    users.forEach((u) => {
+      if (u.userId === 'admin') return;
+      const row = document.createElement('div');
+      row.className = 'user-row';
+      row.innerHTML = `
+        <span class="user-name">${esc(u.username)}</span>
+        <button class="mute-btn" data-uid="${esc(u.userId)}">Mute</button>
+      `;
+      row.querySelector('.mute-btn').addEventListener('click', async () => {
+        await apiFetch(`/api/rooms/${roomId}/mute`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: u.userId }),
+        });
+        showToast(`${u.username} muted`);
+      });
+      usersList.appendChild(row);
+    });
+  }
+
+  // ── Admin WebSocket ──
+  function connectAdminWs(roomId) {
+    disconnectAdminWs();
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    adminWs = new WebSocket(`${proto}://${location.host}/ws?roomId=${encodeURIComponent(roomId)}`);
+
+    adminWs.addEventListener('open', () => {
+      adminWs.send(JSON.stringify({
+        type: 'join',
+        roomId,
+        userId: 'admin',
+        username: 'Admin',
+      }));
+    });
+
+    adminWs.addEventListener('message', (ev) => {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+
+      if (msg.type === 'history') {
+        // history already loaded via HTTP — skip to avoid duplicates
+      } else if (msg.type === 'message') {
+        // Only append if not already in list
+        if (!adminMessageList.querySelector(`[data-id="${msg.id}"]`)) {
+          renderAdminMessage(msg);
+          adminMessageList.scrollTop = adminMessageList.scrollHeight;
+        }
+      } else if (msg.type === 'delete') {
+        const el = adminMessageList.querySelector(`[data-id="${msg.messageId}"]`);
+        if (el) el.remove();
+      } else if (msg.type === 'presence') {
+        detailPresence.textContent = `${msg.count} online`;
+      }
+    });
+
+    adminWs.addEventListener('close', () => {});
+  }
+
+  function disconnectAdminWs() {
+    if (adminWs) {
+      adminWs.close();
+      adminWs = null;
+    }
+  }
+
+  // ── Helpers ──
+  async function apiFetch(url, opts = {}) {
+    opts.headers = opts.headers || {};
+    opts.headers['x-admin-token'] = token;
+    const res = await fetch(url, opts);
+    if (res.status === 401) {
+      token = '';
+      localStorage.removeItem('lpos_admin_token');
+      location.reload();
+      return null;
+    }
+    return res;
+  }
+
+  function esc(str) {
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function formatTime(date) {
+    const h = String(date.getHours()).padStart(2, '0');
+    const m = String(date.getMinutes()).padStart(2, '0');
+    return `${h}:${m}`;
+  }
+
+  let toastTimer;
+  function showToast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 2000);
+  }
+})();
+</script>
+</body>
+</html>
