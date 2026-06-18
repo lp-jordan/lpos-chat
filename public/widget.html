@@ -291,6 +291,8 @@
   let muted = false;
   let qaActive = false;
   let qaQuestions = [];
+  let slowSeconds = 0;
+  let cooldownTimer = null;
   const votedSet = new Set();
 
   // ── Elements ──
@@ -414,7 +416,38 @@
       msgInput.value = '';
       msgInput.style.height = 'auto';
       showQaToast('Question submitted for review');
+    } else if (msg.type === 'slow_mode_config') {
+      slowSeconds = msg.seconds || 0;
+    } else if (msg.type === 'rate_limited') {
+      const note = msg.reason === 'flood'
+        ? "You're sending too fast — slow down"
+        : `Slow mode is on — wait ${msg.retryAfter}s`;
+      startCooldown(msg.retryAfter, note);
     }
+  }
+
+  function defaultBtnLabel() { return qaActive ? 'Submit' : 'Send'; }
+
+  function startCooldown(seconds, note) {
+    if (seconds <= 0) return;
+    clearInterval(cooldownTimer);
+    msgInput.disabled = true;
+    sendBtn.disabled = true;
+    if (note) msgInput.placeholder = note;
+    let remaining = seconds;
+    sendBtn.textContent = `Wait ${remaining}s`;
+    cooldownTimer = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearInterval(cooldownTimer);
+        cooldownTimer = null;
+        if (!muted) { msgInput.disabled = false; sendBtn.disabled = false; }
+        sendBtn.textContent = defaultBtnLabel();
+        msgInput.placeholder = qaActive ? 'Ask a question…' : 'Type a message… (Enter to send)';
+      } else {
+        sendBtn.textContent = `Wait ${remaining}s`;
+      }
+    }, 1000);
   }
 
   function normalizeQuestion(q) {
@@ -559,6 +592,7 @@
       msgInput.value = '';
       msgInput.style.height = 'auto';
     }
+    if (slowSeconds > 0) startCooldown(slowSeconds, null);
   }
 })();
 </script>

@@ -280,6 +280,22 @@
     border-color: #f0a500;
     color: #fff;
   }
+  .slow-control {
+    font-size: 13px;
+    color: #888;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .slow-control select {
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 4px 8px;
+    font-size: 13px;
+    color: #444;
+    cursor: pointer;
+    background: #fff;
+  }
   .presence-badge {
     margin-left: auto;
     background: #eef6ee;
@@ -521,6 +537,15 @@
         <button class="back" id="back-btn">← Back</button>
         <h2 id="room-detail-name"></h2>
         <button id="qa-toggle-btn" class="qa-toggle">Q&amp;A: Off</button>
+        <label class="slow-control">Slow:
+          <select id="slow-select">
+            <option value="0">Off</option>
+            <option value="5">5s</option>
+            <option value="10">10s</option>
+            <option value="30">30s</option>
+            <option value="60">60s</option>
+          </select>
+        </label>
         <div class="presence-badge" id="detail-presence">0 online</div>
       </div>
       <div class="room-detail-body">
@@ -590,6 +615,7 @@
   const qaToggleBtn = document.getElementById('qa-toggle-btn');
   const qaPending = document.getElementById('qa-pending');
   const qaApproved = document.getElementById('qa-approved');
+  const slowSelect = document.getElementById('slow-select');
   let qaActiveState = false;
 
   // ── Login ──
@@ -726,6 +752,7 @@
 
     qaActiveState = !!room.qa_active;
     updateQaToggle();
+    slowSelect.value = String(room.slow_seconds || 0);
     loadAdminHistory(room.id);
     loadQuestions(room.id);
     connectAdminWs(room.id);
@@ -754,6 +781,19 @@
     currentRoom.qa_active = next;
     updateQaToggle();
     showToast(next ? 'Q&A mode on' : 'Q&A mode off');
+  });
+
+  slowSelect.addEventListener('change', async () => {
+    if (!currentRoom) return;
+    const seconds = parseInt(slowSelect.value, 10) || 0;
+    const res = await apiFetch(`/api/rooms/${currentRoom.id}/slowmode`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seconds }),
+    });
+    if (!res || !res.ok) { showToast('Failed to set slow mode'); return; }
+    currentRoom.slow_seconds = seconds;
+    showToast(seconds ? `Slow mode: ${seconds}s` : 'Slow mode off');
   });
 
   async function loadQuestions(roomId) {

@@ -186,6 +186,26 @@ app.post('/api/rooms/:id/qa', requireAdmin, async (req, res) => {
   }
 });
 
+// Set slow mode interval (seconds; 0 = off)
+app.post('/api/rooms/:id/slowmode', requireAdmin, async (req, res) => {
+  let seconds = parseInt(req.body.seconds, 10);
+  if (isNaN(seconds) || seconds < 0) seconds = 0;
+  if (seconds > 300) seconds = 300;
+  try {
+    const r = await db.query(
+      'UPDATE rooms SET slow_seconds = $1 WHERE id = $2 RETURNING id',
+      [seconds, req.params.id]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Room not found' });
+    roomSlow.set(req.params.id, seconds);
+    broadcastToRoom(req.params.id, { type: 'slow_mode_config', seconds });
+    res.json({ ok: true, seconds });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
 // All non-denied questions for moderation (pending + approved)
 app.get('/api/rooms/:id/questions', requireAdmin, async (req, res) => {
   try {
@@ -256,6 +276,45 @@ app.get('/admin/*', (req, res) => {
 // Map<roomId, Set<{ ws, userId, username }>>
 
 const rooms = new Map();
+
+// ─── Rate limiting ───────────────────────────────────────────────────────────
+// Always-on flood protection: max FLOOD_MAX sends per FLOOD_WINDOW_MS per user.
+const FLOOD_WINDOW_MS = 4000;
+const FLOOD_MAX = 6;
+const floodLog = new Map();   // "roomId|userId" -> [timestamps]
+const lastSentAt = new Map(); // "roomId|userId" -> timestamp (for slow mode)
+const roomSlow = new Map();   // roomId -> slow_seconds (cached; updated on join + admin set)
+
+// Returns { ok: true } or { ok: false, reason: 'slow'|'flood', retryAfter: seconds }
+function rateCheck(roomId, userId) {
+  const key = roomId + '|' + userId;
+  const now = Date.now();
+  const slowSeconds = roomSlow.get(roomId) || 0;
+
+  if (slowSeconds > 0) {
+    const last = lastSentAt.get(key) || 0;
+    const elapsed = now - last;
+    const need = slowSeconds * 1000;
+    if (elapsed < need) {
+      return { ok: false, reason: 'slow', retryAfter: Math.ceil((need - elapsed) / 1000) };
+    }
+  }
+
+  const recent = (floodLog.get(key) || []).filter((t) => now - t < FLOOD_WINDOW_MS);
+  if (recent.length >= FLOOD_MAX) {
+    return { ok: false, reason: 'flood', retryAfter: Math.ceil((FLOOD_WINDOW_MS - (now - recent[0])) / 1000) };
+  }
+  return { ok: true };
+}
+
+function rateRecord(roomId, userId) {
+  const key = roomId + '|' + userId;
+  const now = Date.now();
+  const recent = (floodLog.get(key) || []).filter((t) => now - t < FLOOD_WINDOW_MS);
+  recent.push(now);
+  floodLog.set(key, recent);
+  lastSentAt.set(key, now);
+}
 
 function broadcastToRoom(roomId, data, excludeWs = null) {
   const clients = rooms.get(roomId);
@@ -329,7 +388,7 @@ wss.on('connection', (ws, req) => {
       // Validate room exists
       let roomRow;
       try {
-        const result = await db.query('SELECT id, qa_active FROM rooms WHERE id = $1', [roomId]);
+        const result = await db.query('SELECT id, qa_active, slow_seconds FROM rooms WHERE id = $1', [roomId]);
         roomRow = result.rows[0];
       } catch (err) {
         console.error('[ws] join db error', err);
@@ -344,6 +403,7 @@ wss.on('connection', (ws, req) => {
       currentUserId = userId;
       currentUsername = username;
       clientRef = { ws, userId, username };
+      roomSlow.set(roomId, roomRow.slow_seconds || 0);
 
       if (!rooms.has(roomId)) rooms.set(roomId, new Set());
       rooms.get(roomId).add(clientRef);
@@ -380,6 +440,7 @@ wss.on('connection', (ws, req) => {
           questions: approved,
           votedIds,
         }));
+        ws.send(JSON.stringify({ type: 'slow_mode_config', seconds: roomRow.slow_seconds || 0 }));
       } catch (err) {
         console.error('[ws] qa_state error', err);
       }
@@ -404,6 +465,14 @@ wss.on('connection', (ws, req) => {
       }
       const content = String(msg.content || '').trim().substring(0, 500);
       if (!content) return;
+
+      const rcq = rateCheck(currentRoomId, currentUserId);
+      if (!rcq.ok) {
+        ws.send(JSON.stringify({ type: 'rate_limited', reason: rcq.reason, retryAfter: rcq.retryAfter }));
+        return;
+      }
+      rateRecord(currentRoomId, currentUserId);
+
       try {
         const ins = await db.query(
           `INSERT INTO questions (room_id, user_id, username, content)
@@ -463,6 +532,14 @@ wss.on('connection', (ws, req) => {
 
       const content = String(msg.content || '').trim().substring(0, 500);
       if (!content) return;
+
+      // Rate limit (slow mode + flood protection)
+      const rc = rateCheck(currentRoomId, currentUserId);
+      if (!rc.ok) {
+        ws.send(JSON.stringify({ type: 'rate_limited', reason: rc.reason, retryAfter: rc.retryAfter }));
+        return;
+      }
+      rateRecord(currentRoomId, currentUserId);
 
       try {
         const ins = await db.query(

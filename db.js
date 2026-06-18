@@ -43,6 +43,8 @@ async function init() {
   `);
   // Q&A mode flag on rooms
   await query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS qa_active BOOLEAN DEFAULT FALSE;`);
+  // Slow mode interval in seconds (0 = off)
+  await query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS slow_seconds INTEGER NOT NULL DEFAULT 0;`);
   // Submitted questions (pending / approved / denied)
   await query(`
     CREATE TABLE IF NOT EXISTS questions (
