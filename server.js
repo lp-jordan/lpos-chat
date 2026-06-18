@@ -130,6 +130,7 @@ app.post('/api/rooms/:id/unmute', requireAdmin, async (req, res) => {
       'DELETE FROM muted_users WHERE room_id = $1 AND user_id = $2',
       [req.params.id, userId]
     );
+    broadcastToRoom(req.params.id, { type: 'unmuted', userId });
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -137,15 +138,31 @@ app.post('/api/rooms/:id/unmute', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/rooms/:id/users', requireAdmin, (req, res) => {
+app.get('/api/rooms/:id/users', requireAdmin, async (req, res) => {
   const roomId = req.params.id;
   const clients = rooms.get(roomId);
   if (!clients) return res.json([]);
-  const users = [];
-  for (const client of clients) {
-    users.push({ userId: client.userId, username: client.username });
+
+  let mutedSet = new Set();
+  try {
+    const result = await db.query('SELECT user_id FROM muted_users WHERE room_id = $1', [roomId]);
+    mutedSet = new Set(result.rows.map((r) => r.user_id));
+  } catch (err) {
+    console.error('[users] mute lookup error', err);
   }
-  res.json(users);
+
+  // De-dupe by userId (a user may have multiple tabs/connections)
+  const seen = new Map();
+  for (const client of clients) {
+    if (!seen.has(client.userId)) {
+      seen.set(client.userId, {
+        userId: client.userId,
+        username: client.username,
+        muted: mutedSet.has(client.userId),
+      });
+    }
+  }
+  res.json([...seen.values()]);
 });
 
 const noCache = { etag: false, lastModified: false, cacheControl: false, headers: { 'Cache-Control': 'no-store' } };

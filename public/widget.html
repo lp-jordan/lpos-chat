@@ -326,6 +326,13 @@
         sendBtn.disabled = true;
         msgInput.disabled = true;
       }
+    } else if (msg.type === 'unmuted') {
+      if (msg.userId === userId) {
+        muted = false;
+        mutedNotice.style.display = 'none';
+        sendBtn.disabled = false;
+        msgInput.disabled = false;
+      }
     } else if (msg.type === 'presence') {
       presenceCount.textContent = `${msg.count} online`;
     }

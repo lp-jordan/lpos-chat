@@ -377,6 +377,12 @@
     color: #996600;
   }
   .mute-btn:hover { background: #fff8e8; }
+  .mute-btn.muted {
+    border-color: #c44;
+    color: #c44;
+  }
+  .mute-btn.muted:hover { background: #fff0f0; }
+  .mute-btn:disabled { opacity: 0.5; cursor: default; }
   .no-users { font-size: 13px; color: #bbb; padding: 8px 0; }
 
   /* toast */
@@ -703,18 +709,29 @@
       if (u.userId === 'admin') return;
       const row = document.createElement('div');
       row.className = 'user-row';
-      row.innerHTML = `
-        <span class="user-name">${esc(u.username)}</span>
-        <button class="mute-btn" data-uid="${esc(u.userId)}">Mute</button>
-      `;
-      row.querySelector('.mute-btn').addEventListener('click', async () => {
-        await apiFetch(`/api/rooms/${roomId}/mute`, {
+      const btn = document.createElement('button');
+      btn.className = u.muted ? 'mute-btn muted' : 'mute-btn';
+      btn.textContent = u.muted ? 'Unmute' : 'Mute';
+      btn.addEventListener('click', async () => {
+        const action = u.muted ? 'unmute' : 'mute';
+        btn.disabled = true;
+        const res = await apiFetch(`/api/rooms/${roomId}/${action}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ userId: u.userId }),
         });
-        showToast(`${u.username} muted`);
+        btn.disabled = false;
+        if (!res || !res.ok) { showToast('Action failed'); return; }
+        u.muted = !u.muted;
+        btn.textContent = u.muted ? 'Unmute' : 'Mute';
+        btn.classList.toggle('muted', u.muted);
+        showToast(`${u.username} ${u.muted ? 'muted' : 'unmuted'}`);
       });
+      const name = document.createElement('span');
+      name.className = 'user-name';
+      name.textContent = u.username;
+      row.appendChild(name);
+      row.appendChild(btn);
       usersList.appendChild(row);
     });
   }
