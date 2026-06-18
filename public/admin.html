@@ -264,6 +264,22 @@
   }
   .room-detail-header button.back:hover { background: #f5f5f5; }
   .room-detail-header h2 { font-size: 17px; font-weight: 700; }
+  .qa-toggle {
+    background: none;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    color: #888;
+  }
+  .qa-toggle:hover { background: #f5f5f5; }
+  .qa-toggle.on {
+    background: #f0a500;
+    border-color: #f0a500;
+    color: #fff;
+  }
   .presence-badge {
     margin-left: auto;
     background: #eef6ee;
@@ -340,6 +356,60 @@
     border-radius: 4px;
   }
   .admin-msg-del:hover { color: #c44; background: #fff0f0; }
+
+  /* middle: Q&A moderation */
+  .qa-col {
+    width: 320px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    background: #fff;
+    border-right: 1px solid #e8e8e8;
+  }
+  #qa-admin-scroll { flex: 1; overflow-y: auto; padding: 10px 14px; }
+  .qa-section-label {
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: #aaa;
+    margin: 10px 0 6px;
+  }
+  .qa-section-label:first-child { margin-top: 0; }
+  .qa-card {
+    border: 1px solid #eee;
+    border-radius: 8px;
+    padding: 9px 11px;
+    margin-bottom: 8px;
+    background: #fafafa;
+  }
+  .qa-card .qa-card-author { font-size: 11px; color: #999; margin-bottom: 3px; }
+  .qa-card .qa-card-text { font-size: 13px; color: #222; line-height: 1.4; word-break: break-word; white-space: pre-wrap; }
+  .qa-card-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .qa-approve, .qa-deny {
+    border: none;
+    border-radius: 5px;
+    padding: 4px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .qa-approve { background: #2faf5a; color: #fff; }
+  .qa-approve:hover { background: #279049; }
+  .qa-deny { background: none; border: 1px solid #e8aaaa; color: #c44; }
+  .qa-deny:hover { background: #fff0f0; }
+  .qa-votes-badge {
+    display: inline-block;
+    background: #fff4d6;
+    color: #9a7100;
+    font-size: 12px;
+    font-weight: 700;
+    padding: 2px 9px;
+    border-radius: 10px;
+    margin-top: 6px;
+  }
+  .qa-none { font-size: 12px; color: #bbb; padding: 4px 0; }
 
   /* right: users panel */
   .users-col {
@@ -450,12 +520,22 @@
       <div class="room-detail-header">
         <button class="back" id="back-btn">← Back</button>
         <h2 id="room-detail-name"></h2>
+        <button id="qa-toggle-btn" class="qa-toggle">Q&amp;A: Off</button>
         <div class="presence-badge" id="detail-presence">0 online</div>
       </div>
       <div class="room-detail-body">
         <div class="chat-feed-col">
           <div class="col-label">Live Chat</div>
           <div id="admin-message-list"></div>
+        </div>
+        <div class="qa-col" id="qa-col">
+          <div class="col-label">Q&amp;A Moderation</div>
+          <div id="qa-admin-scroll">
+            <div class="qa-section-label">Pending</div>
+            <div id="qa-pending"></div>
+            <div class="qa-section-label">Approved</div>
+            <div id="qa-approved"></div>
+          </div>
         </div>
         <div class="users-col">
           <div class="col-label">Connected Users</div>
@@ -507,6 +587,10 @@
   const detailPresence = document.getElementById('detail-presence');
   const adminMessageList = document.getElementById('admin-message-list');
   const usersList = document.getElementById('users-list');
+  const qaToggleBtn = document.getElementById('qa-toggle-btn');
+  const qaPending = document.getElementById('qa-pending');
+  const qaApproved = document.getElementById('qa-approved');
+  let qaActiveState = false;
 
   // ── Login ──
   loginBtn.addEventListener('click', doLogin);
@@ -640,10 +724,94 @@
     adminMessageList.innerHTML = '';
     usersList.innerHTML = '';
 
+    qaActiveState = !!room.qa_active;
+    updateQaToggle();
     loadAdminHistory(room.id);
+    loadQuestions(room.id);
     connectAdminWs(room.id);
     loadUsers(room.id);
     usersInterval = setInterval(() => loadUsers(room.id), 5000);
+  }
+
+  // ── Q&A moderation ──
+  function updateQaToggle() {
+    qaToggleBtn.textContent = qaActiveState ? 'Q&A: On' : 'Q&A: Off';
+    qaToggleBtn.classList.toggle('on', qaActiveState);
+  }
+
+  qaToggleBtn.addEventListener('click', async () => {
+    if (!currentRoom) return;
+    const next = !qaActiveState;
+    qaToggleBtn.disabled = true;
+    const res = await apiFetch(`/api/rooms/${currentRoom.id}/qa`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ active: next }),
+    });
+    qaToggleBtn.disabled = false;
+    if (!res || !res.ok) { showToast('Failed to toggle Q&A'); return; }
+    qaActiveState = next;
+    currentRoom.qa_active = next;
+    updateQaToggle();
+    showToast(next ? 'Q&A mode on' : 'Q&A mode off');
+  });
+
+  async function loadQuestions(roomId) {
+    const res = await apiFetch(`/api/rooms/${roomId}/questions`);
+    if (!res || !res.ok) return;
+    const all = await res.json();
+    qaPending.innerHTML = '';
+    qaApproved.innerHTML = '';
+    const pending = all.filter((q) => q.status === 'pending');
+    const approved = all.filter((q) => q.status === 'approved')
+      .sort((a, b) => b.votes - a.votes || a.id - b.id);
+    if (pending.length === 0) qaPending.innerHTML = '<div class="qa-none">No pending questions.</div>';
+    else pending.forEach(renderPendingQuestion);
+    if (approved.length === 0) qaApproved.innerHTML = '<div class="qa-none">None approved yet.</div>';
+    else approved.forEach(renderApprovedQuestion);
+  }
+
+  function renderPendingQuestion(q) {
+    const none = qaPending.querySelector('.qa-none');
+    if (none) none.remove();
+    const card = document.createElement('div');
+    card.className = 'qa-card';
+    card.setAttribute('data-qid', q.id);
+    card.innerHTML = `
+      <div class="qa-card-author">${esc(q.username)}</div>
+      <div class="qa-card-text">${esc(q.content)}</div>
+      <div class="qa-card-actions">
+        <button class="qa-approve">Approve</button>
+        <button class="qa-deny">Deny</button>
+      </div>
+    `;
+    card.querySelector('.qa-approve').addEventListener('click', async () => {
+      await apiFetch(`/api/questions/${q.id}/approve`, { method: 'POST' });
+      card.remove();
+      q.votes = q.votes || 0;
+      renderApprovedQuestion(q);
+      if (!qaPending.children.length) qaPending.innerHTML = '<div class="qa-none">No pending questions.</div>';
+    });
+    card.querySelector('.qa-deny').addEventListener('click', async () => {
+      await apiFetch(`/api/questions/${q.id}/deny`, { method: 'POST' });
+      card.remove();
+      if (!qaPending.children.length) qaPending.innerHTML = '<div class="qa-none">No pending questions.</div>';
+    });
+    qaPending.appendChild(card);
+  }
+
+  function renderApprovedQuestion(q) {
+    const none = qaApproved.querySelector('.qa-none');
+    if (none) none.remove();
+    const card = document.createElement('div');
+    card.className = 'qa-card';
+    card.setAttribute('data-qid', q.id);
+    card.innerHTML = `
+      <div class="qa-card-author">${esc(q.username)}</div>
+      <div class="qa-card-text">${esc(q.content)}</div>
+      <span class="qa-votes-badge">▲ <span class="vote-count">${q.votes || 0}</span></span>
+    `;
+    qaApproved.appendChild(card);
   }
 
   backBtn.addEventListener('click', showRooms);
@@ -768,6 +936,13 @@
         if (el) el.remove();
       } else if (msg.type === 'presence') {
         detailPresence.textContent = `${msg.count} online`;
+      } else if (msg.type === 'question_new') {
+        if (!qaPending.querySelector(`[data-qid="${msg.question.id}"]`)) {
+          renderPendingQuestion(msg.question);
+        }
+      } else if (msg.type === 'question_vote') {
+        const card = qaApproved.querySelector(`[data-qid="${msg.id}"] .vote-count`);
+        if (card) card.textContent = msg.votes;
       }
     });
 

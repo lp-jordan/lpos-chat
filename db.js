@@ -41,6 +41,29 @@ async function init() {
       PRIMARY KEY (room_id, user_id)
     );
   `);
+  // Q&A mode flag on rooms
+  await query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS qa_active BOOLEAN DEFAULT FALSE;`);
+  // Submitted questions (pending / approved / denied)
+  await query(`
+    CREATE TABLE IF NOT EXISTS questions (
+      id SERIAL PRIMARY KEY,
+      room_id TEXT REFERENCES rooms(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      username TEXT NOT NULL,
+      content TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      votes INTEGER NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  // One vote per user per question
+  await query(`
+    CREATE TABLE IF NOT EXISTS question_votes (
+      question_id INTEGER REFERENCES questions(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      PRIMARY KEY (question_id, user_id)
+    );
+  `);
   console.log('[db] Tables ready.');
 }
 

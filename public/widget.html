@@ -142,6 +142,60 @@
     border-bottom-left-radius: 3px;
   }
 
+  /* ── Q&A view ── */
+  #qa-banner {
+    display: none;
+    padding: 8px 14px;
+    background: #1d1a0f;
+    color: #f0a500;
+    font-size: 12px;
+    text-align: center;
+    border-bottom: 1px solid #2a2412;
+    flex-shrink: 0;
+  }
+  #qa-list {
+    display: none;
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 10px;
+    flex-direction: column;
+    gap: 8px;
+    background: #1a1a1a;
+  }
+  #qa-list::-webkit-scrollbar { width: 5px; }
+  #qa-list::-webkit-scrollbar-thumb { background: #333; border-radius: 3px; }
+  .qa-item {
+    display: flex;
+    align-items: stretch;
+    gap: 10px;
+    background: #232323;
+    border: 1px solid #2e2e2e;
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  .qa-vote {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    background: #1a1a1a;
+    border: 1px solid #333;
+    border-radius: 8px;
+    cursor: pointer;
+    color: #aaa;
+    padding: 4px 0;
+    user-select: none;
+  }
+  .qa-vote:hover { border-color: #f0a500; color: #f0a500; }
+  .qa-vote.voted { background: #f0a500; border-color: #f0a500; color: #0f0f0f; cursor: default; }
+  .qa-vote .arrow { font-size: 13px; line-height: 1; }
+  .qa-vote .count { font-size: 15px; font-weight: 700; line-height: 1.2; }
+  .qa-body { flex: 1; display: flex; flex-direction: column; justify-content: center; }
+  .qa-author { font-size: 11px; color: #777; margin-bottom: 3px; }
+  .qa-text { font-size: 14px; color: #e8e8e8; line-height: 1.4; word-break: break-word; white-space: pre-wrap; }
+  .qa-empty { color: #555; font-size: 13px; text-align: center; padding: 24px 0; }
+
   /* ── Muted notice ── */
   #muted-notice {
     display: none;
@@ -214,6 +268,8 @@
     <span id="presence-count">0 online</span>
   </div>
   <div id="message-list"></div>
+  <div id="qa-list"></div>
+  <div id="qa-banner">Q&amp;A is open — submit a question below. Approved questions appear here.</div>
   <div id="muted-notice">You have been muted by a moderator.</div>
   <div id="input-area">
     <textarea id="msg-input" rows="1" placeholder="Type a message… (Enter to send)"></textarea>
@@ -233,6 +289,9 @@
   let reconnectAttempts = 0;
   const MAX_RECONNECT = 10;
   let muted = false;
+  let qaActive = false;
+  let qaQuestions = [];
+  const votedSet = new Set();
 
   // ── Elements ──
   const usernameScreen = document.getElementById('username-screen');
@@ -246,6 +305,8 @@
   const usernameInput = document.getElementById('username-input');
   const joinBtn = document.getElementById('join-btn');
   const roomNameLabel = document.getElementById('room-name-label');
+  const qaList = document.getElementById('qa-list');
+  const qaBanner = document.getElementById('qa-banner');
 
   // ── Username gate ──
   if (username && userId) {
@@ -335,7 +396,29 @@
       }
     } else if (msg.type === 'presence') {
       presenceCount.textContent = `${msg.count} online`;
+    } else if (msg.type === 'qa_state') {
+      votedSet.clear();
+      (msg.votedIds || []).forEach((id) => votedSet.add(id));
+      qaQuestions = (msg.questions || []).map(normalizeQuestion);
+      setQaMode(msg.active);
+    } else if (msg.type === 'qa_mode') {
+      setQaMode(msg.active);
+    } else if (msg.type === 'question_approved') {
+      const q = normalizeQuestion(msg.question);
+      if (!qaQuestions.some((x) => x.id === q.id)) qaQuestions.push(q);
+      if (qaActive) renderQa();
+    } else if (msg.type === 'question_vote') {
+      const q = qaQuestions.find((x) => x.id === msg.id);
+      if (q) { q.votes = msg.votes; if (qaActive) renderQa(); }
+    } else if (msg.type === 'question_submitted') {
+      msgInput.value = '';
+      msgInput.style.height = 'auto';
+      showQaToast('Question submitted for review');
     }
+  }
+
+  function normalizeQuestion(q) {
+    return { id: q.id, username: q.username, content: q.content, votes: q.votes || 0, userId: q.user_id || q.userId };
   }
 
   function renderMessage(m) {
@@ -373,6 +456,83 @@
     messageList.scrollTop = messageList.scrollHeight;
   }
 
+  // ── Q&A view ──
+  function setQaMode(active) {
+    qaActive = active;
+    if (active) {
+      messageList.style.display = 'none';
+      qaList.style.display = 'flex';
+      qaBanner.style.display = 'block';
+      roomNameLabel.textContent = 'Q&A';
+      msgInput.placeholder = 'Ask a question…';
+      sendBtn.textContent = 'Submit';
+      renderQa();
+    } else {
+      qaList.style.display = 'none';
+      qaBanner.style.display = 'none';
+      messageList.style.display = 'flex';
+      roomNameLabel.textContent = 'Chat';
+      msgInput.placeholder = 'Type a message… (Enter to send)';
+      sendBtn.textContent = 'Send';
+    }
+  }
+
+  function renderQa() {
+    const sorted = [...qaQuestions].sort((a, b) => b.votes - a.votes || a.id - b.id);
+    qaList.innerHTML = '';
+    if (sorted.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'qa-empty';
+      empty.textContent = 'No approved questions yet. Be the first to ask!';
+      qaList.appendChild(empty);
+      return;
+    }
+    sorted.forEach((q) => {
+      const item = document.createElement('div');
+      item.className = 'qa-item';
+
+      const vote = document.createElement('div');
+      const hasVoted = votedSet.has(q.id);
+      vote.className = hasVoted ? 'qa-vote voted' : 'qa-vote';
+      vote.innerHTML = `<span class="arrow">▲</span><span class="count">${q.votes}</span>`;
+      if (!hasVoted) {
+        vote.addEventListener('click', () => {
+          if (votedSet.has(q.id)) return;
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          votedSet.add(q.id);
+          vote.classList.add('voted');
+          ws.send(JSON.stringify({ type: 'vote', questionId: q.id }));
+        });
+      }
+
+      const body = document.createElement('div');
+      body.className = 'qa-body';
+      const author = document.createElement('div');
+      author.className = 'qa-author';
+      author.textContent = q.username;
+      const text = document.createElement('div');
+      text.className = 'qa-text';
+      text.textContent = q.content;
+      body.appendChild(author);
+      body.appendChild(text);
+
+      item.appendChild(vote);
+      item.appendChild(body);
+      qaList.appendChild(item);
+    });
+  }
+
+  let qaToastTimer;
+  function showQaToast(text) {
+    qaBanner.textContent = text;
+    qaBanner.style.color = '#7ed07e';
+    clearTimeout(qaToastTimer);
+    qaToastTimer = setTimeout(() => {
+      qaBanner.textContent = 'Q&A is open — submit a question below. Approved questions appear here.';
+      qaBanner.style.color = '#f0a500';
+    }, 2500);
+  }
+
   // ── Sending ──
   sendBtn.addEventListener('click', sendMessage);
   msgInput.addEventListener('keydown', (e) => {
@@ -391,9 +551,14 @@
     const content = msgInput.value;
     if (!content.trim()) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    ws.send(JSON.stringify({ type: 'message', content }));
-    msgInput.value = '';
-    msgInput.style.height = 'auto';
+    if (qaActive) {
+      ws.send(JSON.stringify({ type: 'question', content }));
+      // input is cleared on question_submitted ack
+    } else {
+      ws.send(JSON.stringify({ type: 'message', content }));
+      msgInput.value = '';
+      msgInput.style.height = 'auto';
+    }
   }
 })();
 </script>
