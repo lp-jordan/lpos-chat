@@ -15,7 +15,7 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-this-secret-token';
 
 const app = express();
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.static(path.join(__dirname, 'public'), { etag: false, lastModified: false, maxAge: 0, cacheControl: false }));
 
 // ─── Auth middleware ─────────────────────────────────────────────────────────
 
@@ -148,17 +148,19 @@ app.get('/api/rooms/:id/users', requireAdmin, (req, res) => {
   res.json(users);
 });
 
+const noCache = { etag: false, lastModified: false, cacheControl: false, headers: { 'Cache-Control': 'no-store' } };
+
 // Widget page
 app.get('/room/:id', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'widget.html'));
+  res.sendFile(path.join(__dirname, 'public', 'widget.html'), noCache);
 });
 
 // Admin SPA
 app.get('/admin', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'), noCache);
 });
 app.get('/admin/*', (req, res) => {
-  res.sendFile(path.join(__dirname, 'public', 'admin.html'));
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'), noCache);
 });
 
 // ─── In-memory rooms map ─────────────────────────────────────────────────────
