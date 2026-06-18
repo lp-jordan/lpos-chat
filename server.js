@@ -244,7 +244,7 @@ app.post('/api/questions/:id/approve', requireAdmin, async (req, res) => {
   }
 });
 
-// Deny (reject) a question
+// Deny (reject) a pending question — never shown publicly, no broadcast needed
 app.post('/api/questions/:id/deny', requireAdmin, async (req, res) => {
   try {
     const r = await db.query(
@@ -252,6 +252,22 @@ app.post('/api/questions/:id/deny', requireAdmin, async (req, res) => {
       [req.params.id]
     );
     if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+// Remove an already-approved question — drops it live for everyone
+app.post('/api/questions/:id/remove', requireAdmin, async (req, res) => {
+  try {
+    const r = await db.query(
+      `UPDATE questions SET status = 'removed' WHERE id = $1 RETURNING room_id`,
+      [req.params.id]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    broadcastToRoom(r.rows[0].room_id, { type: 'question_removed', id: parseInt(req.params.id, 10) });
     res.json({ ok: true });
   } catch (err) {
     console.error(err);
@@ -513,6 +529,31 @@ wss.on('connection', (ws, req) => {
         });
       } catch (err) {
         console.error('[ws] vote error', err);
+      }
+
+    } else if (msg.type === 'unvote') {
+      if (!currentRoomId || !currentUserId) return;
+      const questionId = parseInt(msg.questionId, 10);
+      if (!questionId) return;
+      try {
+        const del = await db.query(
+          `DELETE FROM question_votes WHERE question_id = $1 AND user_id = $2 RETURNING question_id`,
+          [questionId, currentUserId]
+        );
+        if (del.rows.length === 0) return; // wasn't voted
+        const upd = await db.query(
+          `UPDATE questions SET votes = GREATEST(votes - 1, 0) WHERE id = $1 AND status = 'approved'
+           RETURNING votes`,
+          [questionId]
+        );
+        if (upd.rows.length === 0) return;
+        broadcastToRoom(currentRoomId, {
+          type: 'question_vote',
+          id: questionId,
+          votes: upd.rows[0].votes,
+        });
+      } catch (err) {
+        console.error('[ws] unvote error', err);
       }
 
     } else if (msg.type === 'message') {

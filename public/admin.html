@@ -415,6 +415,7 @@
   .qa-approve:hover { background: #279049; }
   .qa-deny { background: none; border: 1px solid #e8aaaa; color: #c44; }
   .qa-deny:hover { background: #fff0f0; }
+  .qa-card-actions { align-items: center; }
   .qa-votes-badge {
     display: inline-block;
     background: #fff4d6;
@@ -423,8 +424,18 @@
     font-weight: 700;
     padding: 2px 9px;
     border-radius: 10px;
-    margin-top: 6px;
   }
+  .qa-remove {
+    margin-left: auto;
+    background: none;
+    border: 1px solid #e8aaaa;
+    border-radius: 5px;
+    padding: 3px 10px;
+    font-size: 12px;
+    cursor: pointer;
+    color: #c44;
+  }
+  .qa-remove:hover { background: #fff0f0; }
   .qa-none { font-size: 12px; color: #bbb; padding: 4px 0; }
 
   /* right: users panel */
@@ -849,8 +860,17 @@
     card.innerHTML = `
       <div class="qa-card-author">${esc(q.username)}</div>
       <div class="qa-card-text">${esc(q.content)}</div>
-      <span class="qa-votes-badge">▲ <span class="vote-count">${q.votes || 0}</span></span>
+      <div class="qa-card-actions">
+        <span class="qa-votes-badge">▲ <span class="vote-count">${q.votes || 0}</span></span>
+        <button class="qa-remove">Remove</button>
+      </div>
     `;
+    card.querySelector('.qa-remove').addEventListener('click', async () => {
+      const res = await apiFetch(`/api/questions/${q.id}/remove`, { method: 'POST' });
+      if (!res || !res.ok) { showToast('Failed to remove'); return; }
+      card.remove();
+      if (!qaApproved.children.length) qaApproved.innerHTML = '<div class="qa-none">None approved yet.</div>';
+    });
     qaApproved.appendChild(card);
   }
 
@@ -983,6 +1003,10 @@
       } else if (msg.type === 'question_vote') {
         const card = qaApproved.querySelector(`[data-qid="${msg.id}"] .vote-count`);
         if (card) card.textContent = msg.votes;
+      } else if (msg.type === 'question_removed') {
+        const card = qaApproved.querySelector(`[data-qid="${msg.id}"]`);
+        if (card) card.remove();
+        if (!qaApproved.children.length) qaApproved.innerHTML = '<div class="qa-none">None approved yet.</div>';
       }
     });
 

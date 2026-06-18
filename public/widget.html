@@ -412,6 +412,10 @@
     } else if (msg.type === 'question_vote') {
       const q = qaQuestions.find((x) => x.id === msg.id);
       if (q) { q.votes = msg.votes; if (qaActive) renderQa(); }
+    } else if (msg.type === 'question_removed') {
+      qaQuestions = qaQuestions.filter((x) => x.id !== msg.id);
+      votedSet.delete(msg.id);
+      if (qaActive) renderQa();
     } else if (msg.type === 'question_submitted') {
       msgInput.value = '';
       msgInput.style.height = 'auto';
@@ -527,16 +531,22 @@
       const vote = document.createElement('div');
       const hasVoted = votedSet.has(q.id);
       vote.className = hasVoted ? 'qa-vote voted' : 'qa-vote';
+      vote.title = hasVoted ? 'Click to remove your vote' : 'Upvote';
       vote.innerHTML = `<span class="arrow">▲</span><span class="count">${q.votes}</span>`;
-      if (!hasVoted) {
-        vote.addEventListener('click', () => {
-          if (votedSet.has(q.id)) return;
-          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      vote.addEventListener('click', () => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        if (votedSet.has(q.id)) {
+          votedSet.delete(q.id);
+          vote.classList.remove('voted');
+          vote.title = 'Upvote';
+          ws.send(JSON.stringify({ type: 'unvote', questionId: q.id }));
+        } else {
           votedSet.add(q.id);
           vote.classList.add('voted');
+          vote.title = 'Click to remove your vote';
           ws.send(JSON.stringify({ type: 'vote', questionId: q.id }));
-        });
-      }
+        }
+      });
 
       const body = document.createElement('div');
       body.className = 'qa-body';
