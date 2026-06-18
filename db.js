@@ -45,6 +45,8 @@ async function init() {
   await query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS qa_active BOOLEAN DEFAULT FALSE;`);
   // Slow mode interval in seconds (0 = off)
   await query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS slow_seconds INTEGER NOT NULL DEFAULT 0;`);
+  // Pinned announcement text (null/empty = none)
+  await query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS pinned_text TEXT;`);
   // Submitted questions (pending / approved / denied)
   await query(`
     CREATE TABLE IF NOT EXISTS questions (

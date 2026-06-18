@@ -306,6 +306,39 @@
     border-radius: 12px;
   }
 
+  .room-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 24px;
+    background: #fafafa;
+    border-bottom: 1px solid #eee;
+    flex-shrink: 0;
+  }
+  .room-toolbar #pin-input {
+    width: 320px;
+    padding: 7px 11px;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    font-size: 13px;
+    outline: none;
+  }
+  .room-toolbar #pin-input:focus { border-color: #f0a500; }
+  .toolbar-spacer { flex: 1; }
+  .tool-btn {
+    background: #fff;
+    border: 1px solid #ddd;
+    border-radius: 6px;
+    padding: 7px 13px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    color: #444;
+  }
+  .tool-btn:hover { background: #f2f2f2; }
+  .tool-btn.danger { border-color: #e8aaaa; color: #c44; }
+  .tool-btn.danger:hover { background: #fff0f0; }
+
   .room-detail-body {
     flex: 1;
     display: flex;
@@ -559,6 +592,14 @@
         </label>
         <div class="presence-badge" id="detail-presence">0 online</div>
       </div>
+      <div class="room-toolbar">
+        <input id="pin-input" type="text" maxlength="280" placeholder="Pinned announcement…" />
+        <button id="pin-btn" class="tool-btn">Pin</button>
+        <button id="unpin-btn" class="tool-btn">Unpin</button>
+        <div class="toolbar-spacer"></div>
+        <button id="export-btn" class="tool-btn">Export CSV</button>
+        <button id="clear-btn" class="tool-btn danger">Clear Room</button>
+      </div>
       <div class="room-detail-body">
         <div class="chat-feed-col">
           <div class="col-label">Live Chat</div>
@@ -627,6 +668,11 @@
   const qaPending = document.getElementById('qa-pending');
   const qaApproved = document.getElementById('qa-approved');
   const slowSelect = document.getElementById('slow-select');
+  const pinInput = document.getElementById('pin-input');
+  const pinBtn = document.getElementById('pin-btn');
+  const unpinBtn = document.getElementById('unpin-btn');
+  const exportBtn = document.getElementById('export-btn');
+  const clearBtn = document.getElementById('clear-btn');
   let qaActiveState = false;
 
   // ── Login ──
@@ -764,6 +810,7 @@
     qaActiveState = !!room.qa_active;
     updateQaToggle();
     slowSelect.value = String(room.slow_seconds || 0);
+    pinInput.value = room.pinned_text || '';
     loadAdminHistory(room.id);
     loadQuestions(room.id);
     connectAdminWs(room.id);
@@ -792,6 +839,42 @@
     currentRoom.qa_active = next;
     updateQaToggle();
     showToast(next ? 'Q&A mode on' : 'Q&A mode off');
+  });
+
+  async function setPin(text) {
+    if (!currentRoom) return;
+    const res = await apiFetch(`/api/rooms/${currentRoom.id}/pin`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    });
+    if (!res || !res.ok) { showToast('Failed to update pin'); return; }
+    currentRoom.pinned_text = text || null;
+    showToast(text ? 'Announcement pinned' : 'Unpinned');
+  }
+
+  pinBtn.addEventListener('click', () => {
+    const text = pinInput.value.trim();
+    if (!text) { showToast('Enter an announcement first'); return; }
+    setPin(text);
+  });
+  unpinBtn.addEventListener('click', () => { pinInput.value = ''; setPin(''); });
+
+  exportBtn.addEventListener('click', () => {
+    if (!currentRoom) return;
+    const url = `/api/rooms/${currentRoom.id}/transcript?token=${encodeURIComponent(token)}`;
+    window.open(url, '_blank');
+  });
+
+  clearBtn.addEventListener('click', async () => {
+    if (!currentRoom) return;
+    if (!confirm(`Clear ALL messages and questions in "${currentRoom.name}"? This cannot be undone.`)) return;
+    const res = await apiFetch(`/api/rooms/${currentRoom.id}/clear`, { method: 'POST' });
+    if (!res || !res.ok) { showToast('Failed to clear room'); return; }
+    adminMessageList.innerHTML = '';
+    qaPending.innerHTML = '<div class="qa-none">No pending questions.</div>';
+    qaApproved.innerHTML = '<div class="qa-none">None approved yet.</div>';
+    showToast('Room cleared');
   });
 
   slowSelect.addEventListener('change', async () => {
@@ -1007,6 +1090,10 @@
         const card = qaApproved.querySelector(`[data-qid="${msg.id}"]`);
         if (card) card.remove();
         if (!qaApproved.children.length) qaApproved.innerHTML = '<div class="qa-none">None approved yet.</div>';
+      } else if (msg.type === 'cleared') {
+        adminMessageList.innerHTML = '';
+        qaPending.innerHTML = '<div class="qa-none">No pending questions.</div>';
+        qaApproved.innerHTML = '<div class="qa-none">None approved yet.</div>';
       }
     });
 

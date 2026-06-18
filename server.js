@@ -186,6 +186,66 @@ app.post('/api/rooms/:id/qa', requireAdmin, async (req, res) => {
   }
 });
 
+// Set or clear the pinned announcement
+app.post('/api/rooms/:id/pin', requireAdmin, async (req, res) => {
+  const text = (req.body.text == null ? '' : String(req.body.text)).trim().substring(0, 280);
+  const value = text || null;
+  try {
+    const r = await db.query(
+      'UPDATE rooms SET pinned_text = $1 WHERE id = $2 RETURNING id',
+      [value, req.params.id]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Room not found' });
+    broadcastToRoom(req.params.id, { type: 'pinned', text: value });
+    res.json({ ok: true, text: value });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+// Clear / reset a room: wipe messages, questions, votes, mutes (room itself stays)
+app.post('/api/rooms/:id/clear', requireAdmin, async (req, res) => {
+  const roomId = req.params.id;
+  try {
+    await db.query('DELETE FROM messages WHERE room_id = $1', [roomId]);
+    await db.query('DELETE FROM questions WHERE room_id = $1', [roomId]); // cascades question_votes
+    await db.query('DELETE FROM muted_users WHERE room_id = $1', [roomId]);
+    broadcastToRoom(roomId, { type: 'cleared' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+// Download a room transcript as CSV
+app.get('/api/rooms/:id/transcript', requireAdmin, async (req, res) => {
+  const roomId = req.params.id;
+  try {
+    const room = await db.query('SELECT name FROM rooms WHERE id = $1', [roomId]);
+    if (room.rows.length === 0) return res.status(404).json({ error: 'Room not found' });
+    const msgs = await db.query(
+      `SELECT created_at, username, content FROM messages
+       WHERE room_id = $1 AND deleted = FALSE
+       ORDER BY created_at ASC`,
+      [roomId]
+    );
+    const csvEscape = (v) => `"${String(v).replace(/"/g, '""')}"`;
+    const rows = [['timestamp', 'username', 'message'].join(',')];
+    for (const m of msgs.rows) {
+      rows.push([csvEscape(new Date(m.created_at).toISOString()), csvEscape(m.username), csvEscape(m.content)].join(','));
+    }
+    const safeName = (room.rows[0].name || 'room').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="transcript-${safeName}-${roomId}.csv"`);
+    res.send(rows.join('\n'));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
 // Set slow mode interval (seconds; 0 = off)
 app.post('/api/rooms/:id/slowmode', requireAdmin, async (req, res) => {
   let seconds = parseInt(req.body.seconds, 10);
@@ -404,7 +464,7 @@ wss.on('connection', (ws, req) => {
       // Validate room exists
       let roomRow;
       try {
-        const result = await db.query('SELECT id, qa_active, slow_seconds FROM rooms WHERE id = $1', [roomId]);
+        const result = await db.query('SELECT id, qa_active, slow_seconds, pinned_text FROM rooms WHERE id = $1', [roomId]);
         roomRow = result.rows[0];
       } catch (err) {
         console.error('[ws] join db error', err);
@@ -457,6 +517,7 @@ wss.on('connection', (ws, req) => {
           votedIds,
         }));
         ws.send(JSON.stringify({ type: 'slow_mode_config', seconds: roomRow.slow_seconds || 0 }));
+        if (roomRow.pinned_text) ws.send(JSON.stringify({ type: 'pinned', text: roomRow.pinned_text }));
       } catch (err) {
         console.error('[ws] qa_state error', err);
       }

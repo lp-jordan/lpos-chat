@@ -142,6 +142,25 @@
     border-bottom-left-radius: 3px;
   }
 
+  /* ── Pinned bar ── */
+  #pinned-bar {
+    display: none;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 9px 14px;
+    background: #1d1a0f;
+    border-bottom: 1px solid #3a3115;
+    flex-shrink: 0;
+  }
+  #pinned-bar .pin-icon { flex-shrink: 0; font-size: 13px; line-height: 1.4; }
+  #pinned-text {
+    font-size: 13px;
+    color: #f0d488;
+    line-height: 1.4;
+    word-break: break-word;
+    white-space: pre-wrap;
+  }
+
   /* ── Q&A view ── */
   #qa-banner {
     display: none;
@@ -267,6 +286,7 @@
     <span class="room-name" id="room-name-label">Chat</span>
     <span id="presence-count">0 online</span>
   </div>
+  <div id="pinned-bar"><span class="pin-icon">📌</span><span id="pinned-text"></span></div>
   <div id="message-list"></div>
   <div id="qa-list"></div>
   <div id="qa-banner">Q&amp;A is open — submit a question below. Approved questions appear here.</div>
@@ -309,6 +329,8 @@
   const roomNameLabel = document.getElementById('room-name-label');
   const qaList = document.getElementById('qa-list');
   const qaBanner = document.getElementById('qa-banner');
+  const pinnedBar = document.getElementById('pinned-bar');
+  const pinnedText = document.getElementById('pinned-text');
 
   // ── Username gate ──
   if (username && userId) {
@@ -420,6 +442,18 @@
       msgInput.value = '';
       msgInput.style.height = 'auto';
       showQaToast('Question submitted for review');
+    } else if (msg.type === 'pinned') {
+      if (msg.text) {
+        pinnedText.textContent = msg.text;
+        pinnedBar.style.display = 'flex';
+      } else {
+        pinnedBar.style.display = 'none';
+      }
+    } else if (msg.type === 'cleared') {
+      messageList.innerHTML = '';
+      qaQuestions = [];
+      votedSet.clear();
+      if (qaActive) renderQa();
     } else if (msg.type === 'slow_mode_config') {
       slowSeconds = msg.seconds || 0;
     } else if (msg.type === 'rate_limited') {
