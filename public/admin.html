@@ -480,21 +480,52 @@
     overflow: hidden;
     background: #fff;
   }
-  #users-list {
-    flex: 1;
+  #users-list, #banned-list {
     overflow-y: auto;
-    padding: 10px 14px;
+    padding: 8px 14px;
     display: flex;
     flex-direction: column;
     gap: 6px;
   }
+  #users-list { flex: 1; min-height: 60px; }
+  #banned-list { max-height: 30%; border-top: 1px solid #eee; }
   .user-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 7px 0;
+    gap: 6px;
+    padding: 6px 0;
     border-bottom: 1px solid #f0f0f0;
   }
+  .user-actions { display: flex; gap: 4px; flex-shrink: 0; }
+  .verified-dot { color: #2f7de0; font-weight: 800; }
+  .banned-id { font-family: monospace; font-size: 12px; color: #999; }
+  .u-btn {
+    background: none;
+    border: 1px solid #ddd;
+    border-radius: 5px;
+    padding: 3px 8px;
+    font-size: 11px;
+    cursor: pointer;
+    color: #555;
+  }
+  .u-btn:hover { background: #f5f5f5; }
+  .u-btn:disabled { opacity: 0.5; cursor: default; }
+  .u-btn.on { border-color: #2f7de0; color: #2f7de0; }
+  .u-btn.muted { border-color: #d6a400; color: #a07400; background: #fff8e6; }
+  .u-btn.danger { border-color: #e8aaaa; color: #c44; }
+  .u-btn.danger:hover { background: #fff0f0; }
+  #host-post-bar {
+    display: flex;
+    gap: 6px;
+    padding: 10px 14px;
+    border-top: 1px solid #eee;
+    background: #fafafa;
+    flex-shrink: 0;
+  }
+  #host-post-bar #host-name { width: 110px; flex-shrink: 0; padding: 7px 9px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; outline: none; }
+  #host-post-bar #host-msg { flex: 1; padding: 7px 11px; border: 1px solid #ddd; border-radius: 6px; font-size: 13px; outline: none; }
+  #host-post-bar input:focus { border-color: #f0a500; }
   .user-row:last-child { border-bottom: none; }
   .user-name { font-size: 13px; font-weight: 500; color: #333; }
   .mute-btn {
@@ -610,6 +641,11 @@
         <div class="chat-feed-col">
           <div class="col-label">Live Chat</div>
           <div id="admin-message-list"></div>
+          <div id="host-post-bar">
+            <input id="host-name" type="text" maxlength="40" placeholder="Host name" />
+            <input id="host-msg" type="text" maxlength="500" placeholder="Post as host…" />
+            <button id="host-send" class="tool-btn">Send</button>
+          </div>
         </div>
         <div class="qa-col" id="qa-col">
           <div class="col-label">Q&amp;A Moderation</div>
@@ -623,6 +659,8 @@
         <div class="users-col">
           <div class="col-label">Connected Users</div>
           <div id="users-list"></div>
+          <div class="col-label">Banned</div>
+          <div id="banned-list"></div>
         </div>
       </div>
     </div>
@@ -747,6 +785,10 @@
   const detailPresence = document.getElementById('detail-presence');
   const adminMessageList = document.getElementById('admin-message-list');
   const usersList = document.getElementById('users-list');
+  const bannedList = document.getElementById('banned-list');
+  const hostName = document.getElementById('host-name');
+  const hostMsg = document.getElementById('host-msg');
+  const hostSend = document.getElementById('host-send');
   const qaToggleBtn = document.getElementById('qa-toggle-btn');
   const qaPending = document.getElementById('qa-pending');
   const qaApproved = document.getElementById('qa-approved');
@@ -938,8 +980,25 @@
     loadQuestions(room.id);
     connectAdminWs(room.id);
     loadUsers(room.id);
-    usersInterval = setInterval(() => loadUsers(room.id), 5000);
+    loadBanned(room.id);
+    usersInterval = setInterval(() => { loadUsers(room.id); loadBanned(room.id); }, 5000);
   }
+
+  // ── Post as Host ──
+  function sendHostMessage() {
+    if (!currentRoom || !adminWs || adminWs.readyState !== WebSocket.OPEN) return;
+    const content = hostMsg.value.trim();
+    if (!content) return;
+    adminWs.send(JSON.stringify({
+      type: 'message',
+      content,
+      asHost: true,
+      hostName: hostName.value.trim() || 'Host',
+    }));
+    hostMsg.value = '';
+  }
+  hostSend.addEventListener('click', sendHostMessage);
+  hostMsg.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendHostMessage(); });
 
   // ── Q&A moderation ──
   function updateQaToggle() {
@@ -1143,30 +1202,106 @@
       if (u.userId === 'admin' || u.userId === 'admin-console') return;
       const row = document.createElement('div');
       row.className = 'user-row';
-      const btn = document.createElement('button');
-      btn.className = u.muted ? 'mute-btn muted' : 'mute-btn';
-      btn.textContent = u.muted ? 'Unmute' : 'Mute';
-      btn.addEventListener('click', async () => {
-        const action = u.muted ? 'unmute' : 'mute';
-        btn.disabled = true;
-        const res = await apiFetch(`/api/rooms/${roomId}/${action}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ userId: u.userId }),
-        });
-        btn.disabled = false;
-        if (!res || !res.ok) { showToast('Action failed'); return; }
-        u.muted = !u.muted;
-        btn.textContent = u.muted ? 'Unmute' : 'Mute';
-        btn.classList.toggle('muted', u.muted);
-        showToast(`${u.username} ${u.muted ? 'muted' : 'unmuted'}`);
-      });
+
       const name = document.createElement('span');
       name.className = 'user-name';
       name.textContent = u.username;
+      if (u.verified) {
+        const v = document.createElement('span');
+        v.className = 'verified-dot';
+        v.title = 'Verified';
+        v.textContent = '✓';
+        name.appendChild(document.createTextNode(' '));
+        name.appendChild(v);
+      }
+
+      const actions = document.createElement('div');
+      actions.className = 'user-actions';
+
+      async function act(action, body) {
+        const res = await apiFetch(`/api/rooms/${roomId}/${action}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        return res && res.ok;
+      }
+
+      const verifyBtn = document.createElement('button');
+      verifyBtn.className = u.verified ? 'u-btn on' : 'u-btn';
+      verifyBtn.textContent = u.verified ? 'Unverify' : 'Verify';
+      verifyBtn.addEventListener('click', async () => {
+        verifyBtn.disabled = true;
+        const ok = await act(u.verified ? 'unverify' : 'verify', { userId: u.userId });
+        verifyBtn.disabled = false;
+        if (!ok) { showToast('Action failed'); return; }
+        u.verified = !u.verified;
+        verifyBtn.textContent = u.verified ? 'Unverify' : 'Verify';
+        verifyBtn.classList.toggle('on', u.verified);
+      });
+
+      const muteBtn = document.createElement('button');
+      muteBtn.className = u.muted ? 'u-btn muted' : 'u-btn';
+      muteBtn.textContent = u.muted ? 'Unmute' : 'Mute';
+      muteBtn.addEventListener('click', async () => {
+        muteBtn.disabled = true;
+        const ok = await act(u.muted ? 'unmute' : 'mute', { userId: u.userId });
+        muteBtn.disabled = false;
+        if (!ok) { showToast('Action failed'); return; }
+        u.muted = !u.muted;
+        muteBtn.textContent = u.muted ? 'Unmute' : 'Mute';
+        muteBtn.classList.toggle('muted', u.muted);
+      });
+
+      const banBtn = document.createElement('button');
+      banBtn.className = 'u-btn danger';
+      banBtn.textContent = 'Ban';
+      banBtn.addEventListener('click', async () => {
+        if (!confirm(`Ban ${u.username}? They'll be removed and blocked from rejoining.`)) return;
+        const ok = await act('ban', { userId: u.userId });
+        if (!ok) { showToast('Ban failed'); return; }
+        showToast(`${u.username} banned`);
+        row.remove();
+        loadBanned(roomId);
+      });
+
+      actions.appendChild(verifyBtn);
+      actions.appendChild(muteBtn);
+      actions.appendChild(banBtn);
       row.appendChild(name);
-      row.appendChild(btn);
+      row.appendChild(actions);
       usersList.appendChild(row);
+    });
+  }
+
+  async function loadBanned(roomId) {
+    if (!bannedList) return;
+    const res = await apiFetch(`/api/rooms/${roomId}/banned`);
+    if (!res || !res.ok) return;
+    const ids = await res.json();
+    bannedList.innerHTML = '';
+    if (ids.length === 0) { bannedList.innerHTML = '<div class="no-users">No banned users</div>'; return; }
+    ids.forEach((uid) => {
+      const row = document.createElement('div');
+      row.className = 'user-row';
+      const name = document.createElement('span');
+      name.className = 'user-name banned-id';
+      name.textContent = uid.substring(0, 8) + '…';
+      name.title = uid;
+      const unban = document.createElement('button');
+      unban.className = 'u-btn';
+      unban.textContent = 'Unban';
+      unban.addEventListener('click', async () => {
+        const res = await apiFetch(`/api/rooms/${roomId}/unban`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: uid }),
+        });
+        if (!res || !res.ok) { showToast('Unban failed'); return; }
+        row.remove();
+        if (!bannedList.children.length) bannedList.innerHTML = '<div class="no-users">No banned users</div>';
+      });
+      row.appendChild(name);
+      row.appendChild(unban);
+      bannedList.appendChild(row);
     });
   }
 

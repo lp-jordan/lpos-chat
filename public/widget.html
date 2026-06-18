@@ -123,6 +123,34 @@
     margin-bottom: 3px;
   }
   .msg-row.own .msg-meta { color: #666; }
+  .badge {
+    display: inline-block;
+    font-size: 9px;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    padding: 1px 5px;
+    border-radius: 4px;
+    vertical-align: middle;
+  }
+  .badge-host { background: #f0a500; color: #0f0f0f; }
+  .badge-verified { background: #2f7de0; color: #fff; }
+  .msg-row.has-host .msg-bubble { border: 1px solid #f0a500; }
+
+  /* Banned overlay */
+  #banned-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(15,15,15,0.96);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    z-index: 20;
+    padding: 24px;
+    color: #e06060;
+    font-size: 14px;
+    line-height: 1.5;
+  }
 
   .msg-bubble {
     padding: 8px 12px;
@@ -282,6 +310,7 @@
 <!-- Chat UI -->
 <div id="chat-screen">
   <div id="connecting-overlay">Connecting…</div>
+  <div id="banned-overlay">You have been removed from this chat by a moderator.</div>
   <div id="chat-header">
     <span class="room-name" id="room-name-label">Chat</span>
     <span id="presence-count">0 online</span>
@@ -331,6 +360,8 @@
   const qaBanner = document.getElementById('qa-banner');
   const pinnedBar = document.getElementById('pinned-bar');
   const pinnedText = document.getElementById('pinned-text');
+  const bannedOverlay = document.getElementById('banned-overlay');
+  let banned = false;
 
   // ── Username gate ──
   if (username && userId) {
@@ -382,6 +413,7 @@
     });
 
     ws.addEventListener('close', () => {
+      if (banned) return; // removed by moderator — do not reconnect
       connectingOverlay.style.display = 'flex';
       if (reconnectAttempts < MAX_RECONNECT) {
         reconnectAttempts++;
@@ -442,6 +474,17 @@
       msgInput.value = '';
       msgInput.style.height = 'auto';
       showQaToast('Question submitted for review');
+    } else if (msg.type === 'banned') {
+      if (msg.userId === userId) {
+        banned = true;
+        bannedOverlay.style.display = 'flex';
+        connectingOverlay.style.display = 'none';
+        msgInput.disabled = true;
+        sendBtn.disabled = true;
+        if (ws) { try { ws.close(); } catch (e) {} }
+      }
+    } else if (msg.type === 'verified') {
+      if (msg.userId === userId) { /* self verified state; badge shows on next message */ }
     } else if (msg.type === 'pinned') {
       if (msg.text) {
         pinnedText.textContent = msg.text;
@@ -504,9 +547,19 @@
     row.className = `msg-row ${isOwn ? 'own' : 'other'}`;
     if (msgId) row.setAttribute('data-id', msgId);
 
+    const badge = m.badge;
+    if (badge === 'host') row.classList.add('has-host');
+
     const meta = document.createElement('div');
     meta.className = 'msg-meta';
-    meta.textContent = isOwn ? timeStr : `${uname}  ${timeStr}`;
+    if (badge) {
+      const tag = document.createElement('span');
+      tag.className = `badge badge-${badge}`;
+      tag.textContent = badge === 'host' ? 'HOST' : 'VERIFIED';
+      meta.appendChild(tag);
+      meta.appendChild(document.createTextNode(' '));
+    }
+    meta.appendChild(document.createTextNode(isOwn && !badge ? timeStr : `${uname}  ${timeStr}`));
 
     const bubble = document.createElement('div');
     bubble.className = 'msg-bubble';

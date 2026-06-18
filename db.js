@@ -48,6 +48,16 @@ async function init() {
   await query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS slow_seconds INTEGER NOT NULL DEFAULT 0;`);
   // Pinned announcement text (null/empty = none)
   await query(`ALTER TABLE rooms ADD COLUMN IF NOT EXISTS pinned_text TEXT;`);
+  // Message badge: null | 'host' | 'verified'
+  await query(`ALTER TABLE messages ADD COLUMN IF NOT EXISTS badge TEXT;`);
+  // Banned users per room (harder removal than mute)
+  await query(`
+    CREATE TABLE IF NOT EXISTS banned_users (
+      room_id TEXT REFERENCES rooms(id) ON DELETE CASCADE,
+      user_id TEXT NOT NULL,
+      PRIMARY KEY (room_id, user_id)
+    );
+  `);
   // Submitted questions (pending / approved / denied)
   await query(`
     CREATE TABLE IF NOT EXISTS questions (

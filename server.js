@@ -472,18 +472,81 @@ app.get('/api/rooms/:id/users', requireAuth, requireRoomModerator, async (req, r
     console.error('[users] mute lookup error', err);
   }
 
-  // De-dupe by userId (a user may have multiple tabs/connections)
+  // De-dupe by userId (a user may have multiple tabs/connections); exclude admin/mod consoles
   const seen = new Map();
   for (const client of clients) {
+    if (client.isAdmin) continue;
     if (!seen.has(client.userId)) {
       seen.set(client.userId, {
         userId: client.userId,
         username: client.username,
         muted: mutedSet.has(client.userId),
+        verified: isVerified(roomId, client.userId),
       });
     }
   }
   res.json([...seen.values()]);
+});
+
+// Verify / unverify a user for this session (grants a "verified" badge on their messages)
+app.post('/api/rooms/:id/verify', requireAuth, requireRoomModerator, (req, res) => {
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  if (!verifiedUsers.has(req.params.id)) verifiedUsers.set(req.params.id, new Set());
+  verifiedUsers.get(req.params.id).add(userId);
+  broadcastToRoom(req.params.id, { type: 'verified', userId, verified: true });
+  res.json({ ok: true });
+});
+
+app.post('/api/rooms/:id/unverify', requireAuth, requireRoomModerator, (req, res) => {
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  const s = verifiedUsers.get(req.params.id);
+  if (s) s.delete(userId);
+  broadcastToRoom(req.params.id, { type: 'verified', userId, verified: false });
+  res.json({ ok: true });
+});
+
+// Ban / unban (harder than mute: blocks rejoin and disconnects live sockets)
+app.post('/api/rooms/:id/ban', requireAuth, requireRoomModerator, async (req, res) => {
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  try {
+    await db.query(
+      'INSERT INTO banned_users (room_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [req.params.id, userId]
+    );
+    kickUser(req.params.id, userId);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.post('/api/rooms/:id/unban', requireAuth, requireRoomModerator, async (req, res) => {
+  const { userId } = req.body || {};
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  try {
+    await db.query('DELETE FROM banned_users WHERE room_id = $1 AND user_id = $2', [req.params.id, userId]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.get('/api/rooms/:id/banned', requireAuth, requireRoomModerator, async (req, res) => {
+  try {
+    const r = await db.query(
+      'SELECT user_id FROM banned_users WHERE room_id = $1 ORDER BY user_id',
+      [req.params.id]
+    );
+    res.json(r.rows.map((x) => x.user_id));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
 });
 
 const noCache = { etag: false, lastModified: false, cacheControl: false, headers: { 'Cache-Control': 'no-store' } };
@@ -694,6 +757,38 @@ app.get('/mod/:token', (req, res) => {
 
 const rooms = new Map();
 
+// Per-session "verified" grants: roomId -> Set(userId). In-memory (per-session by design).
+const verifiedUsers = new Map();
+function isVerified(roomId, userId) {
+  const s = verifiedUsers.get(roomId);
+  return !!(s && s.has(userId));
+}
+
+// Forcibly disconnect a user's live connections in a room (used on ban)
+function kickUser(roomId, userId) {
+  const clients = rooms.get(roomId);
+  if (!clients) return;
+  for (const client of clients) {
+    if (client.userId === userId && client.ws.readyState === WebSocket.OPEN) {
+      try { client.ws.send(JSON.stringify({ type: 'banned', userId })); } catch (e) {}
+      try { client.ws.close(); } catch (e) {}
+    }
+  }
+}
+
+async function isBanned(roomId, userId) {
+  try {
+    const r = await db.query(
+      'SELECT 1 FROM banned_users WHERE room_id = $1 AND user_id = $2',
+      [roomId, userId]
+    );
+    return r.rows.length > 0;
+  } catch (err) {
+    console.error('[ban] check error', err);
+    return false;
+  }
+}
+
 // ─── Rate limiting ───────────────────────────────────────────────────────────
 // Always-on flood protection: max FLOOD_MAX sends per FLOOD_WINDOW_MS per user.
 const FLOOD_WINDOW_MS = 4000;
@@ -813,6 +908,12 @@ wss.on('connection', (ws, req) => {
       }
       if (!roomRow) {
         ws.send(JSON.stringify({ type: 'error', message: 'Room not found' }));
+        return;
+      }
+
+      // Banned users cannot join (unless they hold a valid admin/mod auth token)
+      if (!msg.auth && await isBanned(roomId, userId)) {
+        ws.send(JSON.stringify({ type: 'banned', userId }));
         return;
       }
 
@@ -984,35 +1085,47 @@ wss.on('connection', (ws, req) => {
     } else if (msg.type === 'message') {
       if (!currentRoomId || !currentUserId) return;
 
-      // Check muted
-      try {
-        const muteCheck = await db.query(
-          'SELECT 1 FROM muted_users WHERE room_id = $1 AND user_id = $2',
-          [currentRoomId, currentUserId]
-        );
-        if (muteCheck.rows.length > 0) return;
-      } catch (err) {
-        console.error('[ws] mute check error', err);
-        return;
+      // Host post: an authenticated admin/mod posting as Host — bypasses mute + rate limit.
+      const asHost = clientRef && clientRef.isAdmin && msg.asHost;
+
+      if (!asHost) {
+        // Check muted
+        try {
+          const muteCheck = await db.query(
+            'SELECT 1 FROM muted_users WHERE room_id = $1 AND user_id = $2',
+            [currentRoomId, currentUserId]
+          );
+          if (muteCheck.rows.length > 0) return;
+        } catch (err) {
+          console.error('[ws] mute check error', err);
+          return;
+        }
       }
 
       const content = String(msg.content || '').trim().substring(0, 500);
       if (!content) return;
 
-      // Rate limit (slow mode + flood protection)
-      const rc = rateCheck(currentRoomId, currentUserId);
-      if (!rc.ok) {
-        ws.send(JSON.stringify({ type: 'rate_limited', reason: rc.reason, retryAfter: rc.retryAfter }));
-        return;
+      if (!asHost) {
+        // Rate limit (slow mode + flood protection)
+        const rc = rateCheck(currentRoomId, currentUserId);
+        if (!rc.ok) {
+          ws.send(JSON.stringify({ type: 'rate_limited', reason: rc.reason, retryAfter: rc.retryAfter }));
+          return;
+        }
+        rateRecord(currentRoomId, currentUserId);
       }
-      rateRecord(currentRoomId, currentUserId);
+
+      const badge = asHost ? 'host' : (isVerified(currentRoomId, currentUserId) ? 'verified' : null);
+      const displayName = asHost
+        ? (String(msg.hostName || '').trim().substring(0, 40) || 'Host')
+        : currentUsername;
 
       try {
         const ins = await db.query(
-          `INSERT INTO messages (room_id, user_id, username, content)
-           VALUES ($1, $2, $3, $4)
-           RETURNING id, room_id, user_id, username, content, created_at`,
-          [currentRoomId, currentUserId, currentUsername, content]
+          `INSERT INTO messages (room_id, user_id, username, content, badge)
+           VALUES ($1, $2, $3, $4, $5)
+           RETURNING id, room_id, user_id, username, content, badge, created_at`,
+          [currentRoomId, currentUserId, displayName, content, badge]
         );
         const row = ins.rows[0];
         broadcastToRoom(currentRoomId, {
@@ -1022,6 +1135,7 @@ wss.on('connection', (ws, req) => {
           userId: row.user_id,
           username: row.username,
           content: row.content,
+          badge: row.badge,
           createdAt: row.created_at,
         });
       } catch (err) {
