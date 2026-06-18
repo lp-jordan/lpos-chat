@@ -540,6 +540,7 @@
   <div class="login-card">
     <h1>LPOS Chat</h1>
     <p class="subtitle">Admin Panel</p>
+    <input id="login-email" type="email" placeholder="Email" autocomplete="username" />
     <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" />
     <button id="login-btn">Login</button>
     <div id="login-error"></div>
@@ -550,7 +551,11 @@
 <div id="app">
   <div class="top-bar">
     <div class="brand">LPOS <span>Chat</span> Admin</div>
-    <button class="logout" id="logout-btn">Logout</button>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <span id="whoami" style="font-size:12px;color:#999;"></span>
+      <button class="logout" id="users-btn" style="display:none;">Users</button>
+      <button class="logout" id="logout-btn">Logout</button>
+    </div>
   </div>
   <div class="content">
     <!-- Rooms list -->
@@ -597,6 +602,7 @@
         <button id="pin-btn" class="tool-btn">Pin</button>
         <button id="unpin-btn" class="tool-btn">Unpin</button>
         <div class="toolbar-spacer"></div>
+        <button id="modaccess-btn" class="tool-btn">Moderator access</button>
         <button id="export-btn" class="tool-btn">Export CSV</button>
         <button id="clear-btn" class="tool-btn danger">Clear Room</button>
       </div>
@@ -619,6 +625,69 @@
           <div id="users-list"></div>
         </div>
       </div>
+    </div>
+
+    <!-- Users management -->
+    <div id="view-users" style="flex:1;overflow-y:auto;padding:28px;display:none;">
+      <div class="rooms-header">
+        <h2>Users</h2>
+        <div style="display:flex;gap:10px;">
+          <button id="users-back-btn" class="ghost-btn">← Rooms</button>
+          <button id="open-create-user-btn" class="primary-btn">+ Add User</button>
+        </div>
+      </div>
+      <div class="rooms-table-wrap">
+        <table>
+          <thead>
+            <tr><th>Email</th><th>Role</th><th>Status</th><th>Actions</th></tr>
+          </thead>
+          <tbody id="users-tbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Create User modal -->
+<div id="create-user-modal" class="modal-backdrop">
+  <div class="modal-card">
+    <h3>Add User</h3>
+    <label class="modal-label" for="new-user-email">Email</label>
+    <input id="new-user-email" type="email" placeholder="person@example.com" autocomplete="off" />
+    <label class="modal-label" for="new-user-password" style="margin-top:12px;">Password</label>
+    <input id="new-user-password" type="password" placeholder="Password" autocomplete="new-password" />
+    <label class="modal-label" for="new-user-role" style="margin-top:12px;">Role</label>
+    <select id="new-user-role" style="width:100%;padding:10px 13px;border:1px solid #ddd;border-radius:7px;font-size:14px;">
+      <option value="moderator">Moderator</option>
+      <option value="admin">Admin</option>
+      <option value="owner">Owner</option>
+    </select>
+    <div class="modal-actions">
+      <button id="cancel-create-user-btn" class="ghost-btn">Cancel</button>
+      <button id="create-user-btn" class="primary-btn">Create</button>
+    </div>
+  </div>
+</div>
+
+<!-- Moderator access modal -->
+<div id="modaccess-modal" class="modal-backdrop">
+  <div class="modal-card" style="width:480px;">
+    <h3>Moderator access</h3>
+    <div class="modal-label">Share links</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px;">
+      <input id="link-label" type="text" placeholder="Label (optional)" style="flex:1;" />
+      <input id="link-hours" type="number" min="0" placeholder="Expiry hrs" style="width:110px;" />
+      <button id="create-link-btn" class="primary-btn">Create link</button>
+    </div>
+    <div id="links-list" style="max-height:180px;overflow-y:auto;margin-bottom:18px;"></div>
+    <div class="modal-label">Assign moderator users</div>
+    <div style="display:flex;gap:8px;margin-bottom:8px;">
+      <select id="assign-user-select" style="flex:1;padding:9px;border:1px solid #ddd;border-radius:7px;"></select>
+      <button id="assign-user-btn" class="primary-btn">Assign</button>
+    </div>
+    <div id="assigned-list" style="max-height:140px;overflow-y:auto;"></div>
+    <div class="modal-actions">
+      <button id="close-modaccess-btn" class="ghost-btn">Close</button>
     </div>
   </div>
 </div>
@@ -643,15 +712,29 @@
   'use strict';
 
   let token = localStorage.getItem('lpos_admin_token') || '';
+  let myRole = localStorage.getItem('lpos_admin_role') || '';
+  let myEmail = localStorage.getItem('lpos_admin_email') || '';
+  let myKind = localStorage.getItem('lpos_admin_kind') || '';
   let currentRoom = null;
   let adminWs = null;
   let usersInterval = null;
+
+  // Mod-link mode: /mod/:token in the URL
+  const modMatch = location.pathname.match(/^\/mod\/([a-f0-9]+)/i);
+  const isModLinkMode = !!modMatch;
+  if (isModLinkMode) {
+    token = modMatch[1];
+    myKind = 'link';
+    localStorage.setItem('lpos_admin_token', token);
+  }
+  const isAdminRole = () => myKind === 'session' && (myRole === 'owner' || myRole === 'admin');
 
   // ── Elements ──
   const viewLogin = document.getElementById('view-login');
   const appEl = document.getElementById('app');
   const viewRooms = document.getElementById('view-rooms');
   const viewRoom = document.getElementById('view-room');
+  const loginEmail = document.getElementById('login-email');
   const loginPassword = document.getElementById('login-password');
   const loginBtn = document.getElementById('login-btn');
   const loginError = document.getElementById('login-error');
@@ -678,35 +761,73 @@
   // ── Login ──
   loginBtn.addEventListener('click', doLogin);
   loginPassword.addEventListener('keydown', (e) => { if (e.key === 'Enter') doLogin(); });
+  loginEmail.addEventListener('keydown', (e) => { if (e.key === 'Enter') loginPassword.focus(); });
 
   async function doLogin() {
     loginError.textContent = '';
+    const email = loginEmail.value.trim();
     const password = loginPassword.value;
     const res = await fetch('/api/admin/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password }),
+      body: JSON.stringify({ email, password }),
     });
     if (!res.ok) {
-      loginError.textContent = 'Invalid password.';
+      loginError.textContent = 'Invalid email or password.';
       return;
     }
     const data = await res.json();
     token = data.token;
+    myRole = data.role || '';
+    myEmail = data.email || '';
+    myKind = 'session';
     localStorage.setItem('lpos_admin_token', token);
+    localStorage.setItem('lpos_admin_role', myRole);
+    localStorage.setItem('lpos_admin_email', myEmail);
+    localStorage.setItem('lpos_admin_kind', myKind);
     showApp();
   }
 
-  logoutBtn.addEventListener('click', () => {
+  logoutBtn.addEventListener('click', async () => {
+    try { await apiFetch('/api/admin/logout', { method: 'POST' }); } catch {}
     token = '';
-    localStorage.removeItem('lpos_admin_token');
+    ['lpos_admin_token','lpos_admin_role','lpos_admin_email','lpos_admin_kind'].forEach((k) => localStorage.removeItem(k));
+    if (isModLinkMode) { location.href = '/admin'; return; }
     location.reload();
   });
+
+  const usersBtn = document.getElementById('users-btn');
+  const whoami = document.getElementById('whoami');
 
   function showApp() {
     viewLogin.style.display = 'none';
     appEl.style.display = 'flex';
+    whoami.textContent = (myEmail ? myEmail + ' · ' : '') + (myRole || (isModLinkMode ? 'moderator (link)' : ''));
+    usersBtn.style.display = isAdminRole() ? '' : 'none';
+    document.getElementById('modaccess-btn').style.display = isAdminRole() ? '' : 'none';
     showRooms();
+  }
+
+  // ── Mod-link mode: jump straight into the single room, locked down ──
+  async function startModLinkMode() {
+    const res = await apiFetch('/api/me');
+    if (!res || !res.ok) {
+      loginError.textContent = 'This moderator link is invalid or expired.';
+      viewLogin.style.display = 'flex';
+      return;
+    }
+    const me = await res.json();
+    myRole = me.role || 'moderator';
+    myKind = me.kind || 'link';
+    viewLogin.style.display = 'none';
+    appEl.style.display = 'flex';
+    whoami.textContent = 'Moderator (link)';
+    usersBtn.style.display = 'none';
+    document.getElementById('modaccess-btn').style.display = 'none';
+    // Hide rooms list chrome; open the one room directly.
+    openRoom({ id: me.roomId, name: 'Moderation', qa_active: false, slow_seconds: 0, pinned_text: null });
+    backBtn.style.display = 'none';
+    document.getElementById('clear-btn').style.display = 'none';
   }
 
   // ── Rooms view ──
@@ -715,6 +836,7 @@
     clearInterval(usersInterval);
     viewRooms.style.display = 'block';
     viewRoom.style.display = 'none';
+    document.getElementById('view-users').style.display = 'none';
     loadRooms();
   }
 
@@ -801,6 +923,7 @@
   function openRoom(room) {
     currentRoom = room;
     viewRooms.style.display = 'none';
+    document.getElementById('view-users').style.display = 'none';
     viewRoom.style.display = 'flex';
     roomDetailName.textContent = room.name;
     detailPresence.textContent = '0 online';
@@ -1017,7 +1140,7 @@
       return;
     }
     users.forEach((u) => {
-      if (u.userId === 'admin') return;
+      if (u.userId === 'admin' || u.userId === 'admin-console') return;
       const row = document.createElement('div');
       row.className = 'user-row';
       const btn = document.createElement('button');
@@ -1057,8 +1180,9 @@
       adminWs.send(JSON.stringify({
         type: 'join',
         roomId,
-        userId: 'admin',
+        userId: 'admin-console',
         username: 'Admin',
+        auth: token,
       }));
     });
 
@@ -1144,8 +1268,213 @@
     toastTimer = setTimeout(() => t.classList.remove('show'), 2000);
   }
 
+  // ── Users management view ──
+  const viewUsers = document.getElementById('view-users');
+  const usersTbody = document.getElementById('users-tbody');
+  const createUserModal = document.getElementById('create-user-modal');
+
+  usersBtn.addEventListener('click', showUsersView);
+  document.getElementById('users-back-btn').addEventListener('click', showRooms);
+
+  function showUsersView() {
+    disconnectAdminWs();
+    clearInterval(usersInterval);
+    viewRooms.style.display = 'none';
+    viewRoom.style.display = 'none';
+    viewUsers.style.display = 'block';
+    loadUsersList();
+  }
+
+  async function loadUsersList() {
+    const res = await apiFetch('/api/users');
+    if (!res || !res.ok) return;
+    const users = await res.json();
+    usersTbody.innerHTML = '';
+    users.forEach((u) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${esc(u.email)}</td>
+        <td>
+          <select class="role-sel" style="padding:4px 8px;border:1px solid #ddd;border-radius:5px;font-size:13px;">
+            <option value="moderator">moderator</option>
+            <option value="admin">admin</option>
+            <option value="owner">owner</option>
+          </select>
+        </td>
+        <td>${u.disabled ? '<span style="color:#c44">disabled</span>' : '<span style="color:#3a9a3a">active</span>'}</td>
+        <td>
+          <button class="room-link-btn toggle-dis">${u.disabled ? 'Enable' : 'Disable'}</button>
+          <button class="btn-danger del-user">Delete</button>
+        </td>`;
+      const sel = tr.querySelector('.role-sel');
+      sel.value = u.role;
+      sel.addEventListener('change', async () => {
+        const r = await apiFetch(`/api/users/${u.id}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ role: sel.value }),
+        });
+        if (!r || !r.ok) { const e = r && await r.json().catch(() => ({})); showToast((e && e.error) || 'Failed'); loadUsersList(); return; }
+        showToast('Role updated');
+      });
+      tr.querySelector('.toggle-dis').addEventListener('click', async () => {
+        const r = await apiFetch(`/api/users/${u.id}`, {
+          method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ disabled: !u.disabled }),
+        });
+        if (!r || !r.ok) { const e = r && await r.json().catch(() => ({})); showToast((e && e.error) || 'Failed'); return; }
+        loadUsersList();
+      });
+      tr.querySelector('.del-user').addEventListener('click', async () => {
+        if (!confirm(`Delete ${u.email}?`)) return;
+        const r = await apiFetch(`/api/users/${u.id}`, { method: 'DELETE' });
+        if (!r || !r.ok) { const e = r && await r.json().catch(() => ({})); showToast((e && e.error) || 'Failed'); return; }
+        loadUsersList();
+      });
+      usersTbody.appendChild(tr);
+    });
+  }
+
+  document.getElementById('open-create-user-btn').addEventListener('click', () => {
+    document.getElementById('new-user-email').value = '';
+    document.getElementById('new-user-password').value = '';
+    document.getElementById('new-user-role').value = 'moderator';
+    createUserModal.classList.add('show');
+  });
+  document.getElementById('cancel-create-user-btn').addEventListener('click', () => createUserModal.classList.remove('show'));
+  createUserModal.addEventListener('click', (e) => { if (e.target === createUserModal) createUserModal.classList.remove('show'); });
+  document.getElementById('create-user-btn').addEventListener('click', async () => {
+    const email = document.getElementById('new-user-email').value.trim();
+    const password = document.getElementById('new-user-password').value;
+    const role = document.getElementById('new-user-role').value;
+    if (!email || !password) { showToast('Email and password required'); return; }
+    const r = await apiFetch('/api/users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password, role }),
+    });
+    if (!r || !r.ok) { const e = r && await r.json().catch(() => ({})); showToast((e && e.error) || 'Failed to create'); return; }
+    createUserModal.classList.remove('show');
+    loadUsersList();
+    showToast('User created');
+  });
+
+  // ── Moderator access modal ──
+  const modaccessModal = document.getElementById('modaccess-modal');
+  document.getElementById('modaccess-btn').addEventListener('click', openModAccess);
+  document.getElementById('close-modaccess-btn').addEventListener('click', () => modaccessModal.classList.remove('show'));
+  modaccessModal.addEventListener('click', (e) => { if (e.target === modaccessModal) modaccessModal.classList.remove('show'); });
+
+  function openModAccess() {
+    if (!currentRoom) return;
+    modaccessModal.classList.add('show');
+    loadLinks();
+    loadModerators();
+  }
+
+  async function loadLinks() {
+    const list = document.getElementById('links-list');
+    const res = await apiFetch(`/api/rooms/${currentRoom.id}/links`);
+    if (!res || !res.ok) { list.innerHTML = ''; return; }
+    const links = await res.json();
+    list.innerHTML = '';
+    if (!links.length) { list.innerHTML = '<div class="qa-none">No links yet.</div>'; return; }
+    links.forEach((l) => {
+      const url = `${location.origin}/mod/${l.token}`;
+      const row = document.createElement('div');
+      row.className = 'user-row';
+      const exp = l.expires_at ? new Date(l.expires_at).toLocaleString() : 'never';
+      const status = l.revoked ? '<span style="color:#c44">revoked</span>' : `expires: ${esc(exp)}`;
+      row.innerHTML = `<span class="user-name" style="min-width:0;flex:1;">${esc(l.label || 'Link')} <small style="color:#aaa">${status}</small></span>`;
+      const actions = document.createElement('span');
+      actions.style.display = 'flex'; actions.style.gap = '6px';
+      if (!l.revoked) {
+        const copy = document.createElement('button'); copy.className = 'room-link-btn'; copy.textContent = 'Copy';
+        copy.addEventListener('click', () => { navigator.clipboard.writeText(url); showToast('Link copied!'); });
+        const rev = document.createElement('button'); rev.className = 'btn-danger'; rev.textContent = 'Revoke';
+        rev.addEventListener('click', async () => {
+          const r = await apiFetch(`/api/links/${l.token}/revoke`, { method: 'POST' });
+          if (!r || !r.ok) { showToast('Failed'); return; }
+          loadLinks();
+        });
+        actions.appendChild(copy); actions.appendChild(rev);
+      }
+      row.appendChild(actions);
+      list.appendChild(row);
+    });
+  }
+
+  document.getElementById('create-link-btn').addEventListener('click', async () => {
+    const label = document.getElementById('link-label').value.trim();
+    const hours = parseFloat(document.getElementById('link-hours').value);
+    const body = { label };
+    if (!isNaN(hours) && hours > 0) body.expiresInHours = hours;
+    const r = await apiFetch(`/api/rooms/${currentRoom.id}/links`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!r || !r.ok) { showToast('Failed to create link'); return; }
+    document.getElementById('link-label').value = '';
+    document.getElementById('link-hours').value = '';
+    loadLinks();
+    showToast('Link created');
+  });
+
+  async function loadModerators() {
+    const assignedEl = document.getElementById('assigned-list');
+    const sel = document.getElementById('assign-user-select');
+    const [modRes, usersRes] = await Promise.all([
+      apiFetch(`/api/rooms/${currentRoom.id}/moderators`),
+      apiFetch('/api/users'),
+    ]);
+    const assigned = modRes && modRes.ok ? await modRes.json() : [];
+    const allUsers = usersRes && usersRes.ok ? await usersRes.json() : [];
+    const assignedIds = new Set(assigned.map((u) => u.id));
+
+    assignedEl.innerHTML = '';
+    if (!assigned.length) assignedEl.innerHTML = '<div class="qa-none">No moderators assigned.</div>';
+    assigned.forEach((u) => {
+      const row = document.createElement('div');
+      row.className = 'user-row';
+      row.innerHTML = `<span class="user-name">${esc(u.email)}</span>`;
+      const rm = document.createElement('button');
+      rm.className = 'btn-danger'; rm.textContent = 'Remove';
+      rm.addEventListener('click', async () => {
+        const r = await apiFetch(`/api/rooms/${currentRoom.id}/moderators/${u.id}`, { method: 'DELETE' });
+        if (!r || !r.ok) { showToast('Failed'); return; }
+        loadModerators();
+      });
+      row.appendChild(rm);
+      assignedEl.appendChild(row);
+    });
+
+    sel.innerHTML = '';
+    const candidates = allUsers.filter((u) => u.role === 'moderator' && !assignedIds.has(u.id));
+    if (!candidates.length) {
+      const o = document.createElement('option'); o.value = ''; o.textContent = 'No moderator users available'; sel.appendChild(o);
+    } else {
+      candidates.forEach((u) => {
+        const o = document.createElement('option'); o.value = u.id; o.textContent = u.email; sel.appendChild(o);
+      });
+    }
+  }
+
+  document.getElementById('assign-user-btn').addEventListener('click', async () => {
+    const userId = document.getElementById('assign-user-select').value;
+    if (!userId) return;
+    const r = await apiFetch(`/api/rooms/${currentRoom.id}/moderators`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userId: parseInt(userId, 10) }),
+    });
+    if (!r || !r.ok) { showToast('Failed'); return; }
+    loadModerators();
+    showToast('Moderator assigned');
+  });
+
   // ── Boot ──
-  if (token) showApp();
+  if (isModLinkMode) {
+    startModLinkMode();
+  } else if (token && myKind === 'session') {
+    showApp();
+  }
 })();
 </script>
 </body>

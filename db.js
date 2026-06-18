@@ -1,6 +1,7 @@
 'use strict';
 
 const { Pool } = require('pg');
+const auth = require('./auth');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -68,6 +69,55 @@ async function init() {
       PRIMARY KEY (question_id, user_id)
     );
   `);
+  // ── Auth / authz tables (Phase A) ──
+  await query(`
+    CREATE TABLE IF NOT EXISTS users (
+      id SERIAL PRIMARY KEY,
+      email TEXT UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'moderator',   -- 'owner' | 'admin' | 'moderator'
+      disabled BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS room_moderators (
+      room_id TEXT REFERENCES rooms(id) ON DELETE CASCADE,
+      user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+      PRIMARY KEY (room_id, user_id)
+    );
+  `);
+  await query(`
+    CREATE TABLE IF NOT EXISTS moderator_links (
+      token TEXT PRIMARY KEY,
+      room_id TEXT REFERENCES rooms(id) ON DELETE CASCADE,
+      label TEXT,
+      expires_at TIMESTAMPTZ,
+      revoked BOOLEAN NOT NULL DEFAULT FALSE,
+      created_at TIMESTAMPTZ DEFAULT NOW()
+    );
+  `);
+
+  // Seed the first owner if no users exist yet.
+  const userCount = await query('SELECT COUNT(*)::int AS n FROM users');
+  if (userCount.rows[0].n === 0) {
+    const email = process.env.ADMIN_EMAIL || 'owner@lpos.local';
+    const passwordHash = auth.hashPassword(process.env.ADMIN_PASSWORD || 'changeme');
+    await query(
+      `INSERT INTO users (email, password_hash, role) VALUES ($1, $2, 'owner')`,
+      [email, passwordHash]
+    );
+    console.log('[db] Seeded owner account: ' + email);
+  }
+
   console.log('[db] Tables ready.');
 }
 

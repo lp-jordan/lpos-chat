@@ -8,36 +8,350 @@ const WebSocket = require('ws');
 const path = require('path');
 const crypto = require('crypto');
 const db = require('./db');
+const auth = require('./auth');
 
 const PORT = process.env.PORT || 3001;
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'changeme';
-const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'change-this-secret-token';
+const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public'), { etag: false, lastModified: false, maxAge: 0, cacheControl: false }));
 
-// ─── Auth middleware ─────────────────────────────────────────────────────────
+// ─── Auth resolution ─────────────────────────────────────────────────────────
 
-function requireAdmin(req, res, next) {
-  const token = req.headers['x-admin-token'] || req.query.token;
-  if (token !== ADMIN_TOKEN) {
-    return res.status(401).json({ error: 'Unauthorized' });
+function extractToken(req) {
+  return req.headers['x-admin-token'] || req.query.token || null;
+}
+
+// Resolve a session OR moderator-link token. Returns null when invalid.
+//   session: { kind:'session', userId, email, role }
+//   link:    { kind:'link', role:'moderator', roomId, linkToken }
+async function resolveAuth(tokenStr) {
+  if (!tokenStr || typeof tokenStr !== 'string') return null;
+  try {
+    const s = await db.query(
+      `SELECT s.token, u.id AS user_id, u.email, u.role, u.disabled
+       FROM sessions s JOIN users u ON u.id = s.user_id
+       WHERE s.token = $1 AND s.expires_at > NOW()`,
+      [tokenStr]
+    );
+    if (s.rows.length > 0) {
+      const row = s.rows[0];
+      if (row.disabled) return null;
+      return { kind: 'session', userId: row.user_id, email: row.email, role: row.role };
+    }
+    const l = await db.query(
+      `SELECT token, room_id FROM moderator_links
+       WHERE token = $1 AND revoked = FALSE
+         AND (expires_at IS NULL OR expires_at > NOW())`,
+      [tokenStr]
+    );
+    if (l.rows.length > 0) {
+      return { kind: 'link', role: 'moderator', roomId: l.rows[0].room_id, linkToken: l.rows[0].token };
+    }
+  } catch (err) {
+    console.error('[auth] resolveAuth error', err);
   }
+  return null;
+}
+
+async function requireAuth(req, res, next) {
+  const a = await resolveAuth(extractToken(req));
+  if (!a) return res.status(401).json({ error: 'Unauthorized' });
+  req.auth = a;
   next();
+}
+
+function requireAdminRole(req, res, next) {
+  const a = req.auth;
+  if (a && a.kind === 'session' && (a.role === 'owner' || a.role === 'admin')) return next();
+  return res.status(403).json({ error: 'Forbidden' });
+}
+
+async function canModerateRoom(req, roomId) {
+  const a = req.auth;
+  if (!a) return false;
+  if (a.kind === 'session' && (a.role === 'owner' || a.role === 'admin')) return true;
+  if (a.kind === 'link') return a.roomId === roomId;
+  if (a.kind === 'session') {
+    try {
+      const r = await db.query(
+        'SELECT 1 FROM room_moderators WHERE room_id = $1 AND user_id = $2',
+        [roomId, a.userId]
+      );
+      return r.rows.length > 0;
+    } catch (err) {
+      console.error('[auth] canModerateRoom error', err);
+      return false;
+    }
+  }
+  return false;
+}
+
+async function requireRoomModerator(req, res, next) {
+  const roomId = req.params.id;
+  if (await canModerateRoom(req, roomId)) return next();
+  return res.status(403).json({ error: 'Forbidden' });
 }
 
 // ─── HTTP routes ─────────────────────────────────────────────────────────────
 
-app.post('/api/admin/login', (req, res) => {
-  const { password } = req.body;
-  if (password !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: 'Invalid password' });
+app.post('/api/admin/login', async (req, res) => {
+  const { email, password } = req.body || {};
+  if (!email || !password) {
+    return res.status(401).json({ error: 'Invalid credentials' });
   }
-  res.json({ token: ADMIN_TOKEN });
+  try {
+    const r = await db.query(
+      'SELECT id, email, role, password_hash, disabled FROM users WHERE email = $1',
+      [String(email).trim().toLowerCase()]
+    );
+    const user = r.rows[0];
+    if (!user || user.disabled || !auth.verifyPassword(password, user.password_hash)) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+    const token = auth.randomToken();
+    const expiresAt = new Date(Date.now() + SESSION_TTL_MS);
+    await db.query(
+      'INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, $3)',
+      [token, user.id, expiresAt]
+    );
+    res.json({ token, role: user.role, email: user.email, expiresAt: expiresAt.toISOString() });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
 });
 
-app.get('/api/rooms', requireAdmin, async (req, res) => {
+app.post('/api/admin/logout', requireAuth, async (req, res) => {
+  try {
+    if (req.auth.kind === 'session') {
+      await db.query('DELETE FROM sessions WHERE token = $1', [extractToken(req)]);
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.get('/api/me', requireAuth, (req, res) => {
+  const a = req.auth;
+  res.json({
+    kind: a.kind,
+    email: a.kind === 'session' ? a.email : null,
+    role: a.role,
+    roomId: a.kind === 'link' ? a.roomId : null,
+  });
+});
+
+// ─── User management (owner/admin only) ──────────────────────────────────────
+
+const VALID_ROLES = ['owner', 'admin', 'moderator'];
+
+app.get('/api/users', requireAuth, requireAdminRole, async (req, res) => {
+  try {
+    const r = await db.query(
+      'SELECT id, email, role, disabled, created_at FROM users ORDER BY created_at ASC'
+    );
+    res.json(r.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.post('/api/users', requireAuth, requireAdminRole, async (req, res) => {
+  let { email, password, role } = req.body || {};
+  email = (email == null ? '' : String(email)).trim().toLowerCase();
+  role = VALID_ROLES.includes(role) ? role : 'moderator';
+  if (!email || !password) return res.status(400).json({ error: 'email and password required' });
+  try {
+    const exists = await db.query('SELECT 1 FROM users WHERE email = $1', [email]);
+    if (exists.rows.length > 0) return res.status(409).json({ error: 'Email already in use' });
+    const r = await db.query(
+      `INSERT INTO users (email, password_hash, role) VALUES ($1, $2, $3)
+       RETURNING id, email, role, disabled, created_at`,
+      [email, auth.hashPassword(password), role]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+// Count of enabled owners (used for last-owner guards)
+async function enabledOwnerCount() {
+  const r = await db.query(
+    `SELECT COUNT(*)::int AS n FROM users WHERE role = 'owner' AND disabled = FALSE`
+  );
+  return r.rows[0].n;
+}
+
+app.patch('/api/users/:id', requireAuth, requireAdminRole, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+  const { role, disabled, password } = req.body || {};
+  try {
+    const cur = await db.query('SELECT id, role, disabled FROM users WHERE id = $1', [id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const user = cur.rows[0];
+
+    // Guard: do not let the last enabled owner be demoted or disabled.
+    const losingOwner =
+      (user.role === 'owner' && !user.disabled) &&
+      ((role && role !== 'owner') || disabled === true);
+    if (losingOwner && (await enabledOwnerCount()) <= 1) {
+      return res.status(400).json({ error: 'Cannot remove the last owner' });
+    }
+
+    const sets = [];
+    const params = [];
+    if (role !== undefined) {
+      if (!VALID_ROLES.includes(role)) return res.status(400).json({ error: 'Invalid role' });
+      params.push(role); sets.push(`role = $${params.length}`);
+    }
+    if (disabled !== undefined) {
+      params.push(!!disabled); sets.push(`disabled = $${params.length}`);
+    }
+    if (password !== undefined && password) {
+      params.push(auth.hashPassword(password)); sets.push(`password_hash = $${params.length}`);
+    }
+    if (sets.length === 0) return res.json({ ok: true });
+    params.push(id);
+    const r = await db.query(
+      `UPDATE users SET ${sets.join(', ')} WHERE id = $${params.length}
+       RETURNING id, email, role, disabled, created_at`,
+      params
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.delete('/api/users/:id', requireAuth, requireAdminRole, async (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (!id) return res.status(400).json({ error: 'Invalid id' });
+  try {
+    const cur = await db.query('SELECT role, disabled FROM users WHERE id = $1', [id]);
+    if (cur.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    const user = cur.rows[0];
+    if (user.role === 'owner' && !user.disabled && (await enabledOwnerCount()) <= 1) {
+      return res.status(400).json({ error: 'Cannot remove the last owner' });
+    }
+    await db.query('DELETE FROM users WHERE id = $1', [id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+// ─── Room moderator assignment (owner/admin only) ────────────────────────────
+
+app.get('/api/rooms/:id/moderators', requireAuth, requireAdminRole, async (req, res) => {
+  try {
+    const r = await db.query(
+      `SELECT u.id, u.email, u.role, u.disabled
+       FROM room_moderators rm JOIN users u ON u.id = rm.user_id
+       WHERE rm.room_id = $1 ORDER BY u.email ASC`,
+      [req.params.id]
+    );
+    res.json(r.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.post('/api/rooms/:id/moderators', requireAuth, requireAdminRole, async (req, res) => {
+  const userId = parseInt(req.body && req.body.userId, 10);
+  if (!userId) return res.status(400).json({ error: 'userId required' });
+  try {
+    await db.query(
+      'INSERT INTO room_moderators (room_id, user_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [req.params.id, userId]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.delete('/api/rooms/:id/moderators/:userId', requireAuth, requireAdminRole, async (req, res) => {
+  const userId = parseInt(req.params.userId, 10);
+  if (!userId) return res.status(400).json({ error: 'Invalid userId' });
+  try {
+    await db.query(
+      'DELETE FROM room_moderators WHERE room_id = $1 AND user_id = $2',
+      [req.params.id, userId]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+// ─── Moderator links (owner/admin only) ──────────────────────────────────────
+
+app.get('/api/rooms/:id/links', requireAuth, requireAdminRole, async (req, res) => {
+  try {
+    const r = await db.query(
+      `SELECT token, label, expires_at, revoked, created_at
+       FROM moderator_links WHERE room_id = $1 ORDER BY created_at DESC`,
+      [req.params.id]
+    );
+    res.json(r.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.post('/api/rooms/:id/links', requireAuth, requireAdminRole, async (req, res) => {
+  const { label } = req.body || {};
+  let expiresInHours = parseFloat(req.body && req.body.expiresInHours);
+  const expiresAt =
+    !isNaN(expiresInHours) && expiresInHours > 0
+      ? new Date(Date.now() + expiresInHours * 3600 * 1000)
+      : null;
+  try {
+    const room = await db.query('SELECT id FROM rooms WHERE id = $1', [req.params.id]);
+    if (room.rows.length === 0) return res.status(404).json({ error: 'Room not found' });
+    const token = auth.randomToken();
+    const r = await db.query(
+      `INSERT INTO moderator_links (token, room_id, label, expires_at)
+       VALUES ($1, $2, $3, $4)
+       RETURNING token, label, expires_at, revoked, created_at`,
+      [token, req.params.id, (label == null ? null : String(label).trim() || null), expiresAt]
+    );
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.post('/api/links/:token/revoke', requireAuth, requireAdminRole, async (req, res) => {
+  try {
+    const r = await db.query(
+      'UPDATE moderator_links SET revoked = TRUE WHERE token = $1 RETURNING token',
+      [req.params.token]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'DB error' });
+  }
+});
+
+app.get('/api/rooms', requireAuth, requireAdminRole, async (req, res) => {
   try {
     const result = await db.query('SELECT * FROM rooms ORDER BY created_at DESC');
     res.json(result.rows);
@@ -47,7 +361,7 @@ app.get('/api/rooms', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/rooms', requireAdmin, async (req, res) => {
+app.post('/api/rooms', requireAuth, requireAdminRole, async (req, res) => {
   const { name } = req.body;
   if (!name || !name.trim()) {
     return res.status(400).json({ error: 'Name is required' });
@@ -62,7 +376,7 @@ app.post('/api/rooms', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/api/rooms/:id', requireAdmin, async (req, res) => {
+app.delete('/api/rooms/:id', requireAuth, requireAdminRole, async (req, res) => {
   try {
     await db.query('DELETE FROM rooms WHERE id = $1', [req.params.id]);
     res.json({ ok: true });
@@ -72,7 +386,7 @@ app.delete('/api/rooms/:id', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/rooms/:id/messages', requireAdmin, async (req, res) => {
+app.get('/api/rooms/:id/messages', requireAuth, requireRoomModerator, async (req, res) => {
   try {
     const result = await db.query(
       `SELECT * FROM messages
@@ -88,8 +402,15 @@ app.get('/api/rooms/:id/messages', requireAdmin, async (req, res) => {
   }
 });
 
-app.delete('/api/messages/:id', requireAdmin, async (req, res) => {
+app.delete('/api/messages/:id', requireAuth, async (req, res) => {
   try {
+    const lookup = await db.query('SELECT room_id FROM messages WHERE id = $1', [req.params.id]);
+    if (lookup.rows.length === 0) {
+      return res.status(404).json({ error: 'Message not found' });
+    }
+    if (!(await canModerateRoom(req, lookup.rows[0].room_id))) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const result = await db.query(
       'UPDATE messages SET deleted = TRUE WHERE id = $1 RETURNING room_id',
       [req.params.id]
@@ -106,7 +427,7 @@ app.delete('/api/messages/:id', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/rooms/:id/mute', requireAdmin, async (req, res) => {
+app.post('/api/rooms/:id/mute', requireAuth, requireRoomModerator, async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId required' });
   try {
@@ -122,7 +443,7 @@ app.post('/api/rooms/:id/mute', requireAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/rooms/:id/unmute', requireAdmin, async (req, res) => {
+app.post('/api/rooms/:id/unmute', requireAuth, requireRoomModerator, async (req, res) => {
   const { userId } = req.body;
   if (!userId) return res.status(400).json({ error: 'userId required' });
   try {
@@ -138,7 +459,7 @@ app.post('/api/rooms/:id/unmute', requireAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/rooms/:id/users', requireAdmin, async (req, res) => {
+app.get('/api/rooms/:id/users', requireAuth, requireRoomModerator, async (req, res) => {
   const roomId = req.params.id;
   const clients = rooms.get(roomId);
   if (!clients) return res.json([]);
@@ -170,7 +491,7 @@ const noCache = { etag: false, lastModified: false, cacheControl: false, headers
 // ─── Q&A routes (admin) ──────────────────────────────────────────────────────
 
 // Toggle Q&A mode on/off for a room
-app.post('/api/rooms/:id/qa', requireAdmin, async (req, res) => {
+app.post('/api/rooms/:id/qa', requireAuth, requireRoomModerator, async (req, res) => {
   const active = !!req.body.active;
   try {
     const r = await db.query(
@@ -187,7 +508,7 @@ app.post('/api/rooms/:id/qa', requireAdmin, async (req, res) => {
 });
 
 // Set or clear the pinned announcement
-app.post('/api/rooms/:id/pin', requireAdmin, async (req, res) => {
+app.post('/api/rooms/:id/pin', requireAuth, requireRoomModerator, async (req, res) => {
   const text = (req.body.text == null ? '' : String(req.body.text)).trim().substring(0, 280);
   const value = text || null;
   try {
@@ -205,7 +526,7 @@ app.post('/api/rooms/:id/pin', requireAdmin, async (req, res) => {
 });
 
 // Clear / reset a room: wipe messages, questions, votes, mutes (room itself stays)
-app.post('/api/rooms/:id/clear', requireAdmin, async (req, res) => {
+app.post('/api/rooms/:id/clear', requireAuth, requireAdminRole, async (req, res) => {
   const roomId = req.params.id;
   try {
     await db.query('DELETE FROM messages WHERE room_id = $1', [roomId]);
@@ -220,7 +541,7 @@ app.post('/api/rooms/:id/clear', requireAdmin, async (req, res) => {
 });
 
 // Download a room transcript as CSV
-app.get('/api/rooms/:id/transcript', requireAdmin, async (req, res) => {
+app.get('/api/rooms/:id/transcript', requireAuth, requireRoomModerator, async (req, res) => {
   const roomId = req.params.id;
   try {
     const room = await db.query('SELECT name FROM rooms WHERE id = $1', [roomId]);
@@ -247,7 +568,7 @@ app.get('/api/rooms/:id/transcript', requireAdmin, async (req, res) => {
 });
 
 // Set slow mode interval (seconds; 0 = off)
-app.post('/api/rooms/:id/slowmode', requireAdmin, async (req, res) => {
+app.post('/api/rooms/:id/slowmode', requireAuth, requireRoomModerator, async (req, res) => {
   let seconds = parseInt(req.body.seconds, 10);
   if (isNaN(seconds) || seconds < 0) seconds = 0;
   if (seconds > 300) seconds = 300;
@@ -267,7 +588,7 @@ app.post('/api/rooms/:id/slowmode', requireAdmin, async (req, res) => {
 });
 
 // All non-denied questions for moderation (pending + approved)
-app.get('/api/rooms/:id/questions', requireAdmin, async (req, res) => {
+app.get('/api/rooms/:id/questions', requireAuth, requireRoomModerator, async (req, res) => {
   try {
     const r = await db.query(
       `SELECT id, user_id, username, content, status, votes, created_at
@@ -284,8 +605,13 @@ app.get('/api/rooms/:id/questions', requireAdmin, async (req, res) => {
 });
 
 // Approve a pending question
-app.post('/api/questions/:id/approve', requireAdmin, async (req, res) => {
+app.post('/api/questions/:id/approve', requireAuth, async (req, res) => {
   try {
+    const look = await db.query('SELECT room_id FROM questions WHERE id = $1', [req.params.id]);
+    if (look.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (!(await canModerateRoom(req, look.rows[0].room_id))) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const r = await db.query(
       `UPDATE questions SET status = 'approved' WHERE id = $1
        RETURNING id, room_id, user_id, username, content, votes, created_at`,
@@ -305,8 +631,13 @@ app.post('/api/questions/:id/approve', requireAdmin, async (req, res) => {
 });
 
 // Deny (reject) a pending question — never shown publicly, no broadcast needed
-app.post('/api/questions/:id/deny', requireAdmin, async (req, res) => {
+app.post('/api/questions/:id/deny', requireAuth, async (req, res) => {
   try {
+    const look = await db.query('SELECT room_id FROM questions WHERE id = $1', [req.params.id]);
+    if (look.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (!(await canModerateRoom(req, look.rows[0].room_id))) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const r = await db.query(
       `UPDATE questions SET status = 'denied' WHERE id = $1 RETURNING room_id`,
       [req.params.id]
@@ -320,8 +651,13 @@ app.post('/api/questions/:id/deny', requireAdmin, async (req, res) => {
 });
 
 // Remove an already-approved question — drops it live for everyone
-app.post('/api/questions/:id/remove', requireAdmin, async (req, res) => {
+app.post('/api/questions/:id/remove', requireAuth, async (req, res) => {
   try {
+    const look = await db.query('SELECT room_id FROM questions WHERE id = $1', [req.params.id]);
+    if (look.rows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (!(await canModerateRoom(req, look.rows[0].room_id))) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
     const r = await db.query(
       `UPDATE questions SET status = 'removed' WHERE id = $1 RETURNING room_id`,
       [req.params.id]
@@ -345,6 +681,11 @@ app.get('/admin', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'), noCache);
 });
 app.get('/admin/*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'admin.html'), noCache);
+});
+
+// Scoped moderator page (same SPA; client detects mod mode from URL)
+app.get('/mod/:token', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'admin.html'), noCache);
 });
 
@@ -409,7 +750,7 @@ function broadcastPresence(roomId) {
   if (!clients) return;
   const ids = new Set();
   for (const client of clients) {
-    if (client.userId !== 'admin') ids.add(client.userId);
+    if (!client.isAdmin) ids.add(client.userId);
   }
   broadcastToRoom(roomId, { type: 'presence', count: ids.size });
 }
@@ -420,7 +761,7 @@ function broadcastToAdmins(roomId, data) {
   if (!clients) return;
   const payload = JSON.stringify(data);
   for (const client of clients) {
-    if (client.userId === 'admin' && client.ws.readyState === WebSocket.OPEN) {
+    if (client.isAdmin && client.ws.readyState === WebSocket.OPEN) {
       client.ws.send(payload);
     }
   }
@@ -475,10 +816,33 @@ wss.on('connection', (ws, req) => {
         return;
       }
 
+      // Determine admin/moderator privilege from the supplied auth token (not userId).
+      let isAdmin = false;
+      if (msg.auth) {
+        const a = await resolveAuth(msg.auth);
+        if (a) {
+          if (a.kind === 'session' && (a.role === 'owner' || a.role === 'admin')) {
+            isAdmin = true;
+          } else if (a.kind === 'link' && a.roomId === roomId) {
+            isAdmin = true;
+          } else if (a.kind === 'session' && a.role === 'moderator') {
+            try {
+              const rm = await db.query(
+                'SELECT 1 FROM room_moderators WHERE room_id = $1 AND user_id = $2',
+                [roomId, a.userId]
+              );
+              if (rm.rows.length > 0) isAdmin = true;
+            } catch (err) {
+              console.error('[ws] mod check error', err);
+            }
+          }
+        }
+      }
+
       currentRoomId = roomId;
       currentUserId = userId;
       currentUsername = username;
-      clientRef = { ws, userId, username };
+      clientRef = { ws, userId, username, isAdmin };
       roomSlow.set(roomId, roomRow.slow_seconds || 0);
 
       if (!rooms.has(roomId)) rooms.set(roomId, new Set());
